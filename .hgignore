@@ -1,0 +1,8 @@
+^\.cproject$
+^\.project$
+^\.settings$
+^build$
+.+\.o$
+.+\.d$
+^\.hgrepos$
+^Development$

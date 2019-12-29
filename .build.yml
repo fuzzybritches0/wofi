@@ -1,0 +1,13 @@
+image: debian/sid
+packages:
+ - build-essential
+ - libwayland-dev
+ - libgtk-3-dev
+ - pkg-config
+ - meson
+
+tasks:
+ - build: |
+    cd wofi
+    meson build
+    ninja -C build
