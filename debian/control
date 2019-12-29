@@ -1,0 +1,26 @@
+Source: wofi
+Section: x11
+Priority: optional
+Maintainer: Sway and related packages team <team+swaywm@tracker.debian.org>
+Uploaders: Jonas Meurer <jonas@freesources.org>
+Build-Depends: debhelper-compat (= 12),
+               libgtk-3-dev,
+               libwayland-dev,
+               meson
+Standards-Version: 4.4.1
+Homepage: https://hg.sr.ht/~scoopta/wofi
+Vcs-Browser: https://salsa.debian.org/swaywm-team/wofi
+Vcs-Git: https://salsa.debian.org/swaywm-team/wofi.git
+Rules-Requires-Root: no
+
+Package: wofi
+Architecture: any
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: application launcher for wlroots based wayland compositors
+ wofi is an application launcher and menu program for wlroots based wayland
+ compositors such as sway. It brings support for three built-in modes:
+  * drun - launch XDG Desktop files
+  * run - launch executables from $PATH
+  * dmenu - dmenu-compatabile mode to read lines from stdin
+ .
+ Wofi is easily themeable with the help of CSS style sheets.

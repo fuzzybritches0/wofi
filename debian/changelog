@@ -1,0 +1,5 @@
+wofi (1.0-1) unstable; urgency=medium
+
+  * Initial release. (Closes: #946775)
+
+ -- Jonas Meurer <jonas@freesources.org>  Sun, 29 Dec 2019 20:25:21 +0100
