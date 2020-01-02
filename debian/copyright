@@ -3,7 +3,7 @@ Source: https://hg.sr.ht/~scoopta/wofi
 
 Files: *
 Copyright: © 2019 Scoopta <scoopta@scoopta.email>
-License: GPL-3
+License: GPL-3+
 
 Files: proto/xdg-shell-protocol.c
 Copyright: © 2008-2013 Kristian Høgsberg
@@ -23,7 +23,7 @@ Copyright: © 2017 Drew DeVault
 License: MIT-like
 
 Files: debian/*
-Copyright: © 2019 Jonas Meurer <jonas@freesources.org>
+Copyright: © 2019-2020 Jonas Meurer <jonas@freesources.org>
 License: GPL-3
 
 License: GPL-3
