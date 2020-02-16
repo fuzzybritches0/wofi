@@ -2,7 +2,8 @@ Source: wofi
 Section: x11
 Priority: optional
 Maintainer: Sway and related packages team <team+swaywm@tracker.debian.org>
-Uploaders: Jonas Meurer <jonas@freesources.org>
+Uploaders: Jonas Meurer <jonas@freesources.org>,
+           Birger Schacht <birger@rantanplan.org>
 Build-Depends: debhelper-compat (= 12),
                libgtk-3-dev,
                libwayland-dev,
