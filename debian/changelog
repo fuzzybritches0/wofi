@@ -1,6 +1,6 @@
 wofi (1.0-2) unstable; urgency=medium
 
-  * Source only (Closes: #950357)
+  * Source only upload (Closes: #950357)
   * d/control:
    - Add Birger Schacht to uploaders
    - Bump standards version to 4.5.0 (no changes required)
