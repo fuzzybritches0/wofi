@@ -1,8 +1,7 @@
 ^\.cproject$
 ^\.project$
 ^\.settings$
-^build$
-.+\.o$
-.+\.d$
 ^\.hgrepos$
-^Development$
+^build$
+^debug$
+^Debug$

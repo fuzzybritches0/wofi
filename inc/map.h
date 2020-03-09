@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2019 Scoopta
+ *  Copyright (C) 2019-2020 Scoopta
  *  This file is part of Wofi
  *  Wofi is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -18,16 +18,14 @@
 #ifndef MAP_H
 #define MAP_H
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <stddef.h>
 #include <stdbool.h>
 
-struct map* map_init();
+struct map* map_init(void);
 
-struct map* map_init_void();
+struct map* map_init_void(void);
 
-void map_free();
+void map_free(struct map* map);
 
 bool map_put(struct map* map, const char* key, char* value);
 

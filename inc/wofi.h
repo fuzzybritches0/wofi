@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2019 Scoopta
+ *  Copyright (C) 2019-2020 Scoopta
  *  This file is part of Wofi
  *  Wofi is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -18,49 +18,30 @@
 #ifndef WAIFU_H
 #define WAIFU_H
 
-#include <map.h>
+#include <wofi_api.h>
+
+#include <utils.h>
 #include <config.h>
 #include <property_box.h>
 
+#include <ctype.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <stddef.h>
 #include <string.h>
+#include <libgen.h>
+#include <unistd.h>
 
 #include <sys/stat.h>
 
 #include <gtk/gtk.h>
 #include <pango/pango.h>
 #include <gdk/gdkwayland.h>
-#include <gio/gdesktopappinfo.h>
 
-#include <wayland-client.h>
+#include <xdg-output-unstable-v1-client-protocol.h>
 #include <wlr-layer-shell-unstable-v1-client-protocol.h>
-
-struct cache_line {
-	char* line;
-	struct wl_list link;
-};
 
 void wofi_init(struct map* config);
 
-char* wofi_parse_image_escapes(const char* text);
-
-void wofi_write_cache(const gchar* mode, const gchar* cmd);
-
-struct wl_list* wofi_read_cache(char* mode);
-
-void wofi_insert_widget(char* mode, char** text, char* search_text, char** actions, size_t action_count);
-
-bool wofi_allow_images();
-
-bool wofi_allow_markup();
-
-uint64_t wofi_get_image_size();
-
-bool wofi_mod_shift();
-
-bool wofi_mod_control();
-
-void wofi_term_run(const char* cmd);
+void wofi_load_css(bool nyan);
 #endif

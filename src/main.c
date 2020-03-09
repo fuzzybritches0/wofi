@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2019 Scoopta
+ *  Copyright (C) 2019-2020 Scoopta
  *  This file is part of Wofi
  *  Wofi is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -27,12 +27,21 @@
 #include <getopt.h>
 #include <string.h>
 
+static const char* nyan_colors[] = {"#FF0000", "#FFA500", "#FFFF00", "#00FF00", "#0000FF", "#FF00FF"};
+static size_t nyan_color_l = sizeof(nyan_colors) / sizeof(char*);
+
 static char* CONFIG_LOCATION;
 static char* COLORS_LOCATION;
 static struct map* config;
 static char* config_path;
 static char* stylesheet;
 static char* color_path;
+static uint8_t nyan_shift = 0;
+
+struct option_node {
+	char* option;
+	struct wl_list link;
+};
 
 static char* get_exec_name(char* path) {
 	char* slash = strrchr(path, '/');
@@ -72,10 +81,16 @@ static void print_usage(char** argv) {
 	printf("--insensitive\t-i\tAllows case insensitive searching\n");
 	printf("--parse-search\t-q\tParses the search text removing image escapes and pango\n");
 	printf("--version\t-v\tPrints the version and then exits\n");
+	printf("--location\t-l\tSets the location\n");
+	printf("--no-actions\t-a\tDisables multiple actions for modes that support it\n");
+	printf("--define\t-D\tSets a config option\n");
+	printf("--lines\t\t-L\tSets the height in number of lines\n");
+	printf("--columns\t-w\tSets the number of columns to display\n");
+	printf("--sort-order\t-O\tSets the sort order\n");
 	exit(0);
 }
 
-static void load_css() {
+void wofi_load_css(bool nyan) {
 	if(access(stylesheet, R_OK) == 0) {
 		FILE* file = fopen(stylesheet, "r");
 		fseek(file, 0, SEEK_END);
@@ -92,25 +107,35 @@ static void load_css() {
 			struct wl_list link;
 		};
 		wl_list_init(&lines);
-		if(access(color_path, R_OK) == 0) {
-			file = fopen(color_path, "r");
-			char* line = NULL;
-			size_t line_size = 0;
-			ssize_t line_l = 0;
-			while((line_l = getline(&line, &line_size, file)) != -1) {
+		if(nyan) {
+			for(ssize_t count = nyan_shift; count < 100 + nyan_shift; ++count) {
+				size_t i = count % nyan_color_l;
 				struct node* entry = malloc(sizeof(struct node));
-				line[line_l - 1] = 0;
-				entry->line = malloc(line_l + 1);
-				strcpy(entry->line, line);
+				entry->line = strdup(nyan_colors[i]);
 				wl_list_insert(&lines, &entry->link);
 			}
-			fclose(file);
-			free(line);
+			nyan_shift = (nyan_shift + 1) % nyan_color_l;
+		} else {
+			if(access(color_path, R_OK) == 0) {
+				file = fopen(color_path, "r");
+				char* line = NULL;
+				size_t line_size = 0;
+				ssize_t line_l = 0;
+				while((line_l = getline(&line, &line_size, file)) != -1) {
+					struct node* entry = malloc(sizeof(struct node));
+					line[line_l - 1] = 0;
+					entry->line = malloc(line_l + 1);
+					strcpy(entry->line, line);
+					wl_list_insert(&lines, &entry->link);
+				}
+				fclose(file);
+				free(line);
+			}
 		}
 
 		ssize_t count = wl_list_length(&lines) - 1;
 		if(count > 99) {
-			fprintf(stderr, "Woah there that's a lot of colors. Try having no more than 99, thanks\n");
+			fprintf(stderr, "Woah there that's a lot of colors. Try having no more than 100, thanks\n");
 			exit(1);
 		}
 		struct node* node;
@@ -175,6 +200,14 @@ static void load_css() {
 			free(node);
 		}
 		gtk_style_context_add_provider_for_screen(gdk_screen_get_default(), GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+	}
+}
+
+static void sig(int32_t signum) {
+	switch(signum) {
+	case SIGTERM:
+		exit(1);
+		break;
 	}
 }
 
@@ -326,6 +359,42 @@ int main(int argc, char** argv) {
 			.val = 'v'
 		},
 		{
+			.name = "location",
+			.has_arg = required_argument,
+			.flag = NULL,
+			.val = 'l'
+		},
+		{
+			.name = "no-actions",
+			.has_arg = no_argument,
+			.flag = NULL,
+			.val = 'a'
+		},
+		{
+			.name = "define",
+			.has_arg = required_argument,
+			.flag = NULL,
+			.val = 'D'
+		},
+		{
+			.name = "lines",
+			.has_arg = required_argument,
+			.flag = NULL,
+			.val = 'L'
+		},
+		{
+			.name = "columns",
+			.has_arg = required_argument,
+			.flag = NULL,
+			.val = 'w'
+		},
+		{
+			.name = "sort-order",
+			.has_arg = required_argument,
+			.flag = NULL,
+			.val = 'O'
+		},
+		{
 			.name = NULL,
 			.has_arg = 0,
 			.flag = NULL,
@@ -353,8 +422,18 @@ int main(int argc, char** argv) {
 	char* matching = NULL;
 	char* insensitive = NULL;
 	char* parse_search = NULL;
+	char* location = NULL;
+	char* no_actions = NULL;
+	char* lines = NULL;
+	char* columns = NULL;
+	char* sort_order = NULL;
+
+	struct wl_list options;
+	wl_list_init(&options);
+	struct option_node* node;
+
 	int opt;
-	while((opt = getopt_long(argc, argv, "hfc:s:C:dS:W:H:p:x:y:nImk:t:P::ebM:iqv", opts, NULL)) != -1) {
+	while((opt = getopt_long(argc, argv, "hfc:s:C:dS:W:H:p:x:y:nImk:t:P::ebM:iqvl:aD:L:w:O:", opts, NULL)) != -1) {
 		switch(opt) {
 		case 'h':
 			print_usage(argv);
@@ -434,6 +513,26 @@ int main(int argc, char** argv) {
 			printf(VERSION"\n");
 			exit(0);
 			break;
+		case 'l':
+			location = optarg;
+			break;
+		case 'a':
+			no_actions = "true";
+			break;
+		case 'D':
+			node = malloc(sizeof(struct option_node));
+			node->option = optarg;
+			wl_list_insert(&options, &node->link);
+			break;
+		case 'L':
+			lines = optarg;
+			break;
+		case 'w':
+			columns = optarg;
+			break;
+		case 'O':
+			sort_order = optarg;
+			break;
 		}
 	}
 
@@ -466,10 +565,13 @@ int main(int argc, char** argv) {
 	}
 	free(config_path);
 
+	if(style_str == NULL) {
+		style_str = map_get(config, "style");
+	}
+
 	//Check if --style was specified
 	if(style_str == NULL) {
 		style_str = map_get(config, "stylesheet");
-		style_str = style_str == NULL ? map_get(config, "style") : style_str;
 		if(style_str == NULL) {
 			const char* style_f = "/style.css";
 			stylesheet = utils_concat(2, CONFIG_LOCATION, style_f);
@@ -484,10 +586,13 @@ int main(int argc, char** argv) {
 		stylesheet = strdup(style_str);
 	}
 
+	if(color_str == NULL) {
+		color_str = map_get(config, "color");
+	}
+
 	//Check if --color was specified
 	if(color_str == NULL) {
 		color_str = map_get(config, "colors");
-		color_str = color_str == NULL ? map_get(config, "color") : color_str;
 		if(color_str == NULL) {
 			color_path = strdup(COLORS_LOCATION);
 		} else {
@@ -503,6 +608,13 @@ int main(int argc, char** argv) {
 
 	free(COLORS_LOCATION);
 
+	struct option_node* tmp;
+	wl_list_for_each_safe(node, tmp, &options, link) {
+		config_put(config, node->option);
+		wl_list_remove(&node->link);
+		free(node);
+	}
+
 	if(map_get(config, "show") != NULL) {
 		map_put(config, "mode", map_get(config, "show"));
 	}
@@ -510,6 +622,11 @@ int main(int argc, char** argv) {
 	if(strcmp(get_exec_name(argv[0]), "dmenu") == 0) {
 		map_put(config, "mode", "dmenu");
 		cache_file = "/dev/null";
+	} else if(strcmp(get_exec_name(argv[0]), "wofi-askpass") == 0) {
+		map_put(config, "mode", "dmenu");
+		cache_file = "/dev/null";
+		password_char = "*";
+		prompt = "Password";
 	} else if(mode != NULL) {
 		map_put(config, "mode", mode);
 	} else if(map_get(config, "mode") == NULL) {
@@ -579,11 +696,31 @@ int main(int argc, char** argv) {
 	if(parse_search != NULL) {
 		map_put(config, "parse_search", parse_search);
 	}
+	if(location != NULL) {
+		map_put(config, "location", location);
+	}
+	if(no_actions != NULL) {
+		map_put(config, "no_actions", no_actions);
+	}
+	if(lines != NULL) {
+		map_put(config, "lines", lines);
+	}
+	if(columns != NULL) {
+		map_put(config, "columns", columns);
+	}
+	if(sort_order != NULL) {
+		map_put(config, "sort_order", sort_order);
+	}
+
+	struct sigaction sigact;
+	memset(&sigact, 0, sizeof(sigact));
+	sigact.sa_handler = sig;
+	sigaction(SIGTERM, &sigact, NULL);
 
 
 	gtk_init(&argc, &argv);
 
-	load_css();
+	wofi_load_css(false);
 
 	wofi_init(config);
 	gtk_main();
