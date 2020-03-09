@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2019 Scoopta
+ *  Copyright (C) 2019-2020 Scoopta
  *  This file is part of Wofi
  *  Wofi is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -17,7 +17,7 @@
 
 #include <utils.h>
 
-time_t utils_get_time_millis() {
+time_t utils_get_time_millis(void) {
 	struct timeval time;
 	gettimeofday(&time, NULL);
 	return (time.tv_sec * 1000) + (time.tv_usec / 1000);
@@ -49,11 +49,11 @@ char* utils_concat(size_t arg_count, ...) {
 }
 
 size_t utils_min(size_t n1, size_t n2) {
-	if(n1 < n2) {
-		return n1;
-	} else {
-		return n2;
-	}
+	return n1 < n2 ? n1 : n2;
+}
+
+size_t utils_max(size_t n1, size_t n2) {
+	return n1 > n2 ? n1 : n2;
 }
 
 size_t utils_min3(size_t n1, size_t n2, size_t n3) {
@@ -66,9 +66,9 @@ size_t utils_min3(size_t n1, size_t n2, size_t n3) {
 	}
 }
 
-size_t utils_distance(const char* str1, const char* str2) {
-	size_t str1_len = strlen(str1);
-	size_t str2_len = strlen(str2);
+size_t utils_distance(const char* haystack, const char* needle) {
+	size_t str1_len = strlen(haystack);
+	size_t str2_len = strlen(needle);
 
 	size_t arr[str1_len + 1][str2_len + 1];
 	arr[0][0] = 0;
@@ -82,7 +82,7 @@ size_t utils_distance(const char* str1, const char* str2) {
 	uint8_t cost;
 	for(size_t c1 = 1; c1 <= str1_len; ++c1) {
 		for(size_t c2 = 1; c2 <= str2_len; ++c2) {
-			if(str1[c1 - 1] == str2[c2 - 1]) {
+			if(haystack[c1 - 1] == needle[c2 - 1]) {
 				cost = 0;
 			} else {
 				cost = 1;
@@ -91,5 +91,18 @@ size_t utils_distance(const char* str1, const char* str2) {
 		}
 	}
 
+	if(strstr(haystack, needle) != NULL) {
+		arr[str1_len][str2_len] -= str2_len;
+	}
+
 	return arr[str1_len][str2_len];
+}
+
+void utils_mkdir(char* path, mode_t mode) {
+	if(access(path, F_OK) != 0) {
+		char* tmp = strdup(path);
+		utils_mkdir(dirname(tmp), mode);
+		mkdir(path, mode);
+		free(tmp);
+	}
 }

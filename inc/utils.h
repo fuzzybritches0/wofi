@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2019 Scoopta
+ *  Copyright (C) 2019-2020 Scoopta
  *  This file is part of Wofi
  *  Wofi is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -24,10 +24,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <libgen.h>
 
+#include <sys/stat.h>
 #include <sys/time.h>
 
-time_t utils_get_time_millis();
+time_t utils_get_time_millis(void);
 
 void utils_sleep_millis(time_t millis);
 
@@ -37,6 +40,8 @@ size_t utils_min(size_t n1, size_t n2);
 
 size_t utils_min3(size_t n1, size_t n2, size_t n3);
 
-size_t utils_distance(const char* str1, const char* str2);
+size_t utils_distance(const char* haystack, const char* needle);
+
+void utils_mkdir(char* path, mode_t mode);
 
 #endif
