@@ -1,3 +1,9 @@
+wofi (1.1.2-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Jonas Meurer <jonas@freesources.org>  Tue, 10 Mar 2020 09:29:53 +0100
+
 wofi (1.1.1-1) unstable; urgency=medium
 
   * New upstream release.
