@@ -15,7 +15,18 @@
     along with Wofi.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <wofi.h>
+#include <stdio.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <unistd.h>
+
+#include <sys/stat.h>
+
+#include <utils.h>
+#include <config.h>
+#include <wofi_api.h>
 
 static const char* arg_names[] = {"always_parse_args", "show_all"};
 
@@ -139,8 +150,34 @@ struct widget* wofi_run_get_widget(void) {
 	return NULL;
 }
 
+static char* parse_args(const char* cmd, size_t* space_count) {
+	size_t cmd_l = strlen(cmd);
+	char* ret = calloc(1, cmd_l + 1);
 
-void wofi_run_exec(const gchar* cmd) {
+	bool in_quote = false;
+	size_t ret_count = 0;
+	for(size_t count = 0; count < cmd_l; ++count) {
+		if(cmd[count] == ' ' && !in_quote) {
+			++*space_count;
+			ret[ret_count++] = '\n';
+			continue;
+		}
+
+		if(cmd[count] == '"') {
+			in_quote = !in_quote;
+			continue;
+		}
+
+		if(cmd[count] == '\\') {
+			++count;
+		}
+		ret[ret_count++] = cmd[count];
+	}
+
+	return ret;
+}
+
+void wofi_run_exec(const char* cmd) {
 	bool arg_run = wofi_mod_control() || always_parse_args;
 	if(strncmp(cmd, arg_str, strlen(arg_str)) == 0) {
 		arg_run = true;
@@ -152,13 +189,9 @@ void wofi_run_exec(const gchar* cmd) {
 		wofi_term_run(cmd);
 	}
 	if(arg_run) {
-		char* tmp = strdup(cmd);
 		size_t space_count = 2;
-		char* space;
-		while((space = strchr(tmp, ' ')) != NULL) {
-			++space_count;
-			*space = '\n';
-		}
+		char* tmp = parse_args(cmd, &space_count);
+
 		char** args = malloc(space_count * sizeof(char*));
 		char* save_ptr;
 		char* str = strtok_r(tmp, "\n", &save_ptr);

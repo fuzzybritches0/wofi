@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2019 Scoopta
+ *  Copyright (C) 2019-2020 Scoopta
  *  This file is part of Wofi
  *  Wofi is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -17,6 +17,8 @@
 
 #include <property_box.h>
 
+#include <map.h>
+
 struct _WofiPropertyBox {
 	GtkBox super;
 };
@@ -25,7 +27,7 @@ typedef struct {
 	struct map* properties;
 } WofiPropertyBoxPrivate;
 
-G_DEFINE_TYPE_WITH_PRIVATE(WofiPropertyBox, wofi_property_box, GTK_TYPE_BOX);
+G_DEFINE_TYPE_WITH_PRIVATE(WofiPropertyBox, wofi_property_box, GTK_TYPE_BOX)
 
 static void wofi_property_box_init(WofiPropertyBox* box) {
 	WofiPropertyBoxPrivate* this = wofi_property_box_get_instance_private(box);

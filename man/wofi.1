@@ -36,10 +36,10 @@ Runs wofi in dmenu mode.
 Specifies the mode to run in. A list of modes can be found in \fBwofi\fR(7).
 .TP
 .B \-W, \-\-width=\fIWIDTH\fR
-Specifies the menu width in pixels, default is 1000.
+Specifies the menu width in pixels or percent of screen size, default is 50%. Pixels are used unless the number ends with a %.
 .TP
 .B \-H, \-\-height=\fIHEIGHT\fR
-Specifies the menu height in pixels, default is 400.
+Specifies the menu height in pixels or percent of screen size, default is 40%. Pixels are used unless the number ends with a %.
 .TP
 .B \-p, \-\-prompt=\fIPROMPT\fR
 Sets the prompt to be display in the search box, default is the name of the mode.
@@ -103,6 +103,15 @@ Specifies the number of columns to display, default is 1.
 .TP
 .B \-O, \-\-sort\-order=\fIORDER\fR
 Specifies the default sort order. There are currently two orders, default and alphabetical. See \fBwofi\fR(7) for details.
+.TP
+.B \-G, \-\-gtk\-dark
+Instructs wofi to use the dark variant of the current GTK theme, if available.
+.TP
+.B \-Q, \-\-search
+Specifies something to search for immediately on opening
+.TP
+.B \-o, \-\-monitor
+Sets the monitor to open on
 
 .SH CONFIGURATION
 Wofi has 3 main files used for configuration. All files are completely optional.

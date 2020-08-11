@@ -15,17 +15,23 @@
     along with Wofi.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <map.h>
-#include <wofi.h>
-#include <utils.h>
-#include <config.h>
-
 #include <stdio.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <getopt.h>
 #include <string.h>
+#include <unistd.h>
+#include <signal.h>
+
+#include <map.h>
+#include <wofi.h>
+#include <utils.h>
+#include <config.h>
+
+#include <wayland-client.h>
+
+#include <gtk/gtk.h>
 
 static const char* nyan_colors[] = {"#FF0000", "#FFA500", "#FFFF00", "#00FF00", "#0000FF", "#FF00FF"};
 static size_t nyan_color_l = sizeof(nyan_colors) / sizeof(char*);
@@ -87,6 +93,9 @@ static void print_usage(char** argv) {
 	printf("--lines\t\t-L\tSets the height in number of lines\n");
 	printf("--columns\t-w\tSets the number of columns to display\n");
 	printf("--sort-order\t-O\tSets the sort order\n");
+	printf("--gtk-dark\t-G\tUses the dark variant of the current GTK theme\n");
+	printf("--search\t-Q\tSearch for something immediately on open\n");
+	printf("--monitor\t-o\tSets the monitor to open on\n");
 	exit(0);
 }
 
@@ -395,6 +404,24 @@ int main(int argc, char** argv) {
 			.val = 'O'
 		},
 		{
+			.name = "gtk-dark",
+			.has_arg = no_argument,
+			.flag = NULL,
+			.val = 'G'
+		},
+		{
+			.name = "search",
+			.has_arg = required_argument,
+			.flag = NULL,
+			.val = 'Q'
+		},
+		{
+			.name = "monitor",
+			.has_arg = required_argument,
+			.flag = NULL,
+			.val = 'o'
+		},
+		{
 			.name = NULL,
 			.has_arg = 0,
 			.flag = NULL,
@@ -427,13 +454,16 @@ int main(int argc, char** argv) {
 	char* lines = NULL;
 	char* columns = NULL;
 	char* sort_order = NULL;
+	char* gtk_dark = NULL;
+	char* search = NULL;
+	char* monitor = NULL;
 
 	struct wl_list options;
 	wl_list_init(&options);
 	struct option_node* node;
 
 	int opt;
-	while((opt = getopt_long(argc, argv, "hfc:s:C:dS:W:H:p:x:y:nImk:t:P::ebM:iqvl:aD:L:w:O:", opts, NULL)) != -1) {
+	while((opt = getopt_long(argc, argv, "hfc:s:C:dS:W:H:p:x:y:nImk:t:P::ebM:iqvl:aD:L:w:O:GQ:o:", opts, NULL)) != -1) {
 		switch(opt) {
 		case 'h':
 			print_usage(argv);
@@ -533,6 +563,15 @@ int main(int argc, char** argv) {
 		case 'O':
 			sort_order = optarg;
 			break;
+		case 'G':
+			gtk_dark = "true";
+			break;
+		case 'Q':
+			search = optarg;
+			break;
+		case 'o':
+			monitor = optarg;
+			break;
 		}
 	}
 
@@ -604,6 +643,11 @@ int main(int argc, char** argv) {
 		}
 	} else {
 		color_path = strdup(color_str);
+	}
+
+	//Check if --gtk-dark was specified
+	if(gtk_dark == NULL) {
+		gtk_dark = map_get(config, "gtk_dark");
 	}
 
 	free(COLORS_LOCATION);
@@ -711,15 +755,24 @@ int main(int argc, char** argv) {
 	if(sort_order != NULL) {
 		map_put(config, "sort_order", sort_order);
 	}
+	if(search != NULL) {
+		map_put(config, "search", search);
+	}
+	if(monitor != NULL) {
+		map_put(config, "monitor", monitor);
+	}
 
-	struct sigaction sigact;
-	memset(&sigact, 0, sizeof(sigact));
+	struct sigaction sigact = {0};
 	sigact.sa_handler = sig;
 	sigaction(SIGTERM, &sigact, NULL);
 
 
 	gtk_init(&argc, &argv);
 
+	if(gtk_dark != NULL && strcmp(gtk_dark, "true") == 0) {
+		g_object_set(gtk_settings_get_default(),
+			"gtk-application-prefer-dark-theme", TRUE, NULL);
+	}
 	wofi_load_css(false);
 
 	wofi_init(config);

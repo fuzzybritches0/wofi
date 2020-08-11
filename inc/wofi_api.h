@@ -18,9 +18,7 @@
 #ifndef WOFI_API_H
 #define WOFI_API_H
 
-#include <map.h>
-
-#include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 
 #include <wayland-client.h>
@@ -44,11 +42,15 @@ struct widget* wofi_create_widget(struct mode* mode, char* text[], char* search_
 
 void wofi_insert_widgets(struct mode* mode);
 
+char* wofi_get_dso_path(struct mode* mode);
+
 bool wofi_allow_images(void);
 
 bool wofi_allow_markup(void);
 
 uint64_t wofi_get_image_size(void);
+
+uint64_t wofi_get_window_scale(void);
 
 bool wofi_mod_shift(void);
 
