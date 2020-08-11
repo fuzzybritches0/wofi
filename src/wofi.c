@@ -17,14 +17,36 @@
 
 #include <wofi.h>
 
-static const char* terminals[] = {"kitty", "termite", "gnome-terminal", "weston-terminal"};
+#include <ctype.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <string.h>
+#include <libgen.h>
+#include <unistd.h>
+#include <stdint.h>
+
+#include <sys/stat.h>
+
+#include <utils.h>
+#include <config.h>
+#include <utils_g.h>
+#include <property_box.h>
+#include <widget_builder.h>
+
+#include <xdg-output-unstable-v1-client-protocol.h>
+#include <wlr-layer-shell-unstable-v1-client-protocol.h>
+
+#include <pango/pango.h>
+#include <gdk/gdkwayland.h>
+
+static const char* terminals[] = {"kitty", "termite", "alacritty", "gnome-terminal", "weston-terminal"};
 
 enum matching_mode {
 	MATCHING_MODE_CONTAINS,
 	MATCHING_MODE_FUZZY
 };
 
-enum locations {
+enum location {
 	LOCATION_CENTER,
 	LOCATION_TOP_LEFT,
 	LOCATION_TOP,
@@ -43,7 +65,7 @@ enum sort_order {
 
 static uint64_t width, height;
 static char* x, *y;
-static struct zwlr_layer_shell_v1* shell;
+static struct zwlr_layer_shell_v1* shell = NULL;
 static GtkWidget* window, *outer_box, *scroll, *entry, *inner_box, *previous_selection = NULL;
 static gchar* filter = NULL;
 static char* mode = NULL;
@@ -62,21 +84,27 @@ static bool insensitive;
 static bool parse_search;
 static GtkAlign content_halign;
 static struct map* config;
-static enum locations location;
+static enum location location;
 static bool no_actions;
 static uint64_t columns;
 static bool user_moved = false;
-static uint16_t widget_count = 0;
+static uint32_t widget_count = 0;
 static enum sort_order sort_order;
 static int64_t max_height = 0;
-static uint64_t lines;
+static uint32_t lines, max_lines;
 static int8_t line_wrap;
 static int64_t ix, iy;
 static uint8_t konami_cycle;
 static bool is_konami = false;
+static GDBusProxy* dbus = NULL;
+static GdkRectangle resolution = {0};
+static bool resize_expander = false;
+static uint32_t line_count = 0;
+static bool dynamic_lines;
+static struct wl_list mode_list;
+static pthread_t mode_thread;
 
-static char* key_up, *key_down, *key_left, *key_right, *key_forward, *key_backward, *key_submit, *key_exit;
-static char* mod_up, *mod_down, *mod_left, *mod_right, *mod_forward, *mod_backward, *mod_exit;
+static struct map* keys;
 
 static struct wl_display* wl = NULL;
 static struct wl_surface* wl_surface;
@@ -84,23 +112,16 @@ static struct wl_list outputs;
 static struct zxdg_output_manager_v1* output_manager;
 static struct zwlr_layer_surface_v1* wlr_surface;
 
-struct mode {
-	void (*mode_exec)(const gchar* cmd);
-	struct widget* (*mode_get_widget)(void);
-	char* name;
-	struct wl_list link;
-};
-
-struct widget {
-	size_t action_count;
-	char* mode, **text, *search_text, **actions;
-};
-
 struct output_node {
 	char* name;
 	struct wl_output* output;
 	int32_t width, height, x, y;
 	struct wl_list link;
+};
+
+struct key_entry {
+	char* mod;
+	void (*action)(void);
 };
 
 static void nop() {}
@@ -191,95 +212,132 @@ static gboolean do_search(gpointer data) {
 	return G_SOURCE_CONTINUE;
 }
 
+static void get_img_data(char* original, char* str, struct map* mode_map, bool first, char** mode, char** data) {
+	char* colon = strchr(str, ':');
+	if(colon == NULL) {
+		if(first) {
+			*mode = "text";
+			*data = str;
+			return;
+		} else {
+			*mode = NULL;
+			*data = NULL;
+			return;
+		}
+	}
+
+	*colon = 0;
+
+	if(map_contains(mode_map, str)) {
+		if(original != str) {
+			*(str - 1) = 0;
+		}
+		*mode = str;
+		*data = colon + 1;
+	} else if(first) {
+		*colon = ':';
+		*mode = "text";
+		*data = str;
+	} else {
+		*colon = ':';
+		get_img_data(original, colon + 1, mode_map, first, mode, data);
+	}
+}
+
+//This is hideous, why did I do this to myself
 static char* parse_images(WofiPropertyBox* box, const char* text, bool create_widgets) {
 	char* ret = strdup("");
 	struct map* mode_map = map_init();
 	map_put(mode_map, "img", "true");
+	map_put(mode_map, "img-noscale", "true");
+	map_put(mode_map, "img-base64", "true");
+	map_put(mode_map, "img-base64-noscale", "true");
 	map_put(mode_map, "text", "true");
 
-	char* tmp = strdup(text);
+	char* original = strdup(text);
+	char* mode1 = NULL;
+	char* mode2 = NULL;
+	char* data1 = NULL;
+	char* data2 = NULL;
 
-	struct wl_list modes;
-	struct node {
-		char* str;
-		struct wl_list link;
-	};
+	get_img_data(original, original, mode_map, true, &mode2, &data2);
 
-	wl_list_init(&modes);
-
-	bool data = false;
-
-	char* save_ptr;
-	char* str = strtok_r(tmp, ":", &save_ptr);
-	do {
-		if(str == NULL) {
-			break;
-		}
-		if(map_contains(mode_map, str) || data) {
-			struct node* node = malloc(sizeof(struct node));
-			node->str = str;
-			wl_list_insert(&modes, &node->link);
-			data = !data;
-		}
-	} while((str = strtok_r(NULL, ":", &save_ptr)) != NULL);
-
-	char* tmp2 = strdup(text);
-	char* start = tmp2;
-
-	char* mode = NULL;
-
-	struct node* node = wl_container_of(modes.prev, node, link);
 	while(true) {
-		if(mode == NULL) {
-			if(start == NULL) {
+		if(mode1 == NULL) {
+			mode1 = mode2;
+			data1 = data2;
+			if(data1 != NULL) {
+				get_img_data(original, data1, mode_map, false, &mode2, &data2);
+			} else {
 				break;
 			}
-			char* tmp_start = (start - tmp2) + tmp;
-			if(!wl_list_empty(&modes) && tmp_start == node->str) {
-				if(node->link.prev == &modes) {
-					break;
-				}
-				mode = node->str;
-				node = wl_container_of(node->link.prev, node, link);
-				str = node->str;
-				start = ((str + strlen(str) + 1) - tmp) + tmp2;
-				if(((start - tmp2) + text) > (text + strlen(text))) {
-					start = NULL;
-				}
-				if(node->link.prev != &modes) {
-					node = wl_container_of(node->link.prev, node, link);
-				}
-			} else {
-				mode = "text";
-				str = start;
-				if(!wl_list_empty(&modes)) {
-					start = (node->str - tmp - 1) + tmp2;
-					*start = 0;
-					++start;
-				}
-			}
 		} else {
-			if(strcmp(mode, "img") == 0 && create_widgets) {
-				GdkPixbuf* buf = gdk_pixbuf_new_from_file(str, NULL);
-				int width = gdk_pixbuf_get_width(buf);
-				int height = gdk_pixbuf_get_height(buf);
-				if(height > width) {
-					float percent = (float) image_size / height;
-					GdkPixbuf* tmp = gdk_pixbuf_scale_simple(buf, width * percent, image_size, GDK_INTERP_BILINEAR);
-					g_object_unref(buf);
-					buf = tmp;
-				} else {
-					float percent = (float) image_size / width;
-					GdkPixbuf* tmp = gdk_pixbuf_scale_simple(buf, image_size, height * percent, GDK_INTERP_BILINEAR);
-					g_object_unref(buf);
-					buf = tmp;
+			if(strcmp(mode1, "img") == 0 && create_widgets) {
+				GdkPixbuf* buf = gdk_pixbuf_new_from_file(data1, NULL);
+				if(buf == NULL) {
+					fprintf(stderr, "Image %s cannot be loaded\n", data1);
+					goto done;
 				}
-				GtkWidget* img = gtk_image_new_from_pixbuf(buf);
+
+				buf = utils_g_resize_pixbuf(buf, image_size * wofi_get_window_scale(), GDK_INTERP_BILINEAR);
+
+				GtkWidget* img = gtk_image_new();
+				cairo_surface_t* surface = gdk_cairo_surface_create_from_pixbuf(buf, wofi_get_window_scale(), gtk_widget_get_window(img));
+				gtk_image_set_from_surface(GTK_IMAGE(img), surface);
+				cairo_surface_destroy(surface);
+				g_object_unref(buf);
+
 				gtk_widget_set_name(img, "img");
 				gtk_container_add(GTK_CONTAINER(box), img);
-			} else if(strcmp(mode, "text") == 0) {
+			} else if(strcmp(mode1, "img-noscale") == 0 && create_widgets) {
+				GdkPixbuf* buf = gdk_pixbuf_new_from_file(data1, NULL);
+				if(buf == NULL) {
+					fprintf(stderr, "Image %s cannot be loaded\n", data1);
+					goto done;
+				}
+
+				GtkWidget* img = gtk_image_new();
+				cairo_surface_t* surface = gdk_cairo_surface_create_from_pixbuf(buf, wofi_get_window_scale(), gtk_widget_get_window(img));
+				gtk_image_set_from_surface(GTK_IMAGE(img), surface);
+				cairo_surface_destroy(surface);
+				g_object_unref(buf);
+
+				gtk_widget_set_name(img, "img");
+				gtk_container_add(GTK_CONTAINER(box), img);
+			} else if(strcmp(mode1, "img-base64") == 0 && create_widgets) {
+				GdkPixbuf* buf = utils_g_pixbuf_from_base64(data1);
+				if(buf == NULL) {
+					fprintf(stderr, "base64 image cannot be loaded\n");
+					goto done;
+				}
+
+				buf = utils_g_resize_pixbuf(buf, image_size, GDK_INTERP_BILINEAR);
+
+				GtkWidget* img = gtk_image_new();
+				cairo_surface_t* surface = gdk_cairo_surface_create_from_pixbuf(buf, wofi_get_window_scale(), gtk_widget_get_window(img));
+				gtk_image_set_from_surface(GTK_IMAGE(img), surface);
+				cairo_surface_destroy(surface);
+				g_object_unref(buf);
+
+				gtk_widget_set_name(img, "img");
+				gtk_container_add(GTK_CONTAINER(box), img);
+			} else if(strcmp(mode1, "img-base64-noscale") == 0 && create_widgets) {
+				GdkPixbuf* buf = utils_g_pixbuf_from_base64(data1);
+				if(buf == NULL) {
+					fprintf(stderr, "base64 image cannot be loaded\n");
+					goto done;
+				}
+				GtkWidget* img = gtk_image_new();
+				cairo_surface_t* surface = gdk_cairo_surface_create_from_pixbuf(buf, wofi_get_window_scale(), gtk_widget_get_window(img));
+				gtk_image_set_from_surface(GTK_IMAGE(img), surface);
+				cairo_surface_destroy(surface);
+				g_object_unref(buf);
+
+				gtk_widget_set_name(img, "img");
+				gtk_container_add(GTK_CONTAINER(box), img);
+			} else if(strcmp(mode1, "text") == 0) {
 				if(create_widgets) {
-					GtkWidget* label = gtk_label_new(str);
+					GtkWidget* label = gtk_label_new(data1);
 					gtk_widget_set_name(label, "text");
 					gtk_label_set_use_markup(GTK_LABEL(label), allow_markup);
 					gtk_label_set_xalign(GTK_LABEL(label), 0);
@@ -290,25 +348,17 @@ static char* parse_images(WofiPropertyBox* box, const char* text, bool create_wi
 					gtk_container_add(GTK_CONTAINER(box), label);
 				} else {
 					char* tmp = ret;
-					ret = utils_concat(2, ret, str);
+					ret = utils_concat(2, ret, data1);
 					free(tmp);
 				}
 			}
-			mode = NULL;
-			if(wl_list_empty(&modes)) {
-				break;
-			}
+			done:
+			mode1 = NULL;
 		}
 	}
-	free(tmp);
-	free(tmp2);
+	free(original);
 	map_free(mode_map);
 
-	struct node* tmp_node;
-	wl_list_for_each_safe(node, tmp_node, &modes, link) {
-		wl_list_remove(&node->link);
-		free(node);
-	}
 	if(create_widgets) {
 		free(ret);
 		return NULL;
@@ -321,16 +371,24 @@ char* wofi_parse_image_escapes(const char* text) {
 	return parse_images(NULL, text, false);
 }
 
+static void setup_label(char* mode, WofiPropertyBox* box) {
+	wofi_property_box_add_property(box, "mode", mode);
+	char index[11];
+	snprintf(index, sizeof(index), "%u", ++widget_count);
+	wofi_property_box_add_property(box, "index", index);
+
+	gtk_widget_set_name(GTK_WIDGET(box), "unselected");
+
+	GtkStyleContext* style = gtk_widget_get_style_context(GTK_WIDGET(box));
+	gtk_style_context_add_class(style, "entry");
+}
+
 static GtkWidget* create_label(char* mode, char* text, char* search_text, char* action) {
 	GtkWidget* box = wofi_property_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-	gtk_widget_set_name(box, "unselected");
-	GtkStyleContext* style = gtk_widget_get_style_context(box);
-	gtk_style_context_add_class(style, "entry");
-	wofi_property_box_add_property(WOFI_PROPERTY_BOX(box), "mode", mode);
+
 	wofi_property_box_add_property(WOFI_PROPERTY_BOX(box), "action", action);
-	char index[6];
-	snprintf(index, sizeof(index), "%u", ++widget_count);
-	wofi_property_box_add_property(WOFI_PROPERTY_BOX(box), "index", index);
+
+	setup_label(mode, WOFI_PROPERTY_BOX(box));
 
 	if(allow_images) {
 		parse_images(WOFI_PROPERTY_BOX(box), text, true);
@@ -353,7 +411,7 @@ static GtkWidget* create_label(char* mode, char* text, char* search_text, char* 
 			free(tmp);
 		}
 		if(allow_markup) {
-			char* out;
+			char* out = NULL;
 			pango_parse_markup(search_text, -1, 0, NULL, &out, NULL, NULL);
 			free(search_text);
 			search_text = out;
@@ -398,11 +456,31 @@ static void activate_item(GtkFlowBox* flow_box, GtkFlowBoxChild* row, gpointer d
 static void expand(GtkExpander* expander, gpointer data) {
 	(void) data;
 	GtkWidget* box = gtk_bin_get_child(GTK_BIN(expander));
-	gtk_widget_set_visible(box, !gtk_expander_get_expanded(expander));
+	resize_expander = !gtk_expander_get_expanded(expander);
+	gtk_widget_set_visible(box, resize_expander);
+}
+
+static void update_surface_size(void) {
+	if(lines > 0) {
+		height = max_height * lines;
+		height += 5;
+	}
+	if(shell != NULL) {
+		zwlr_layer_surface_v1_set_size(wlr_surface, width, height);
+		wl_surface_commit(wl_surface);
+		wl_display_roundtrip(wl);
+	}
+
+	gtk_window_resize(GTK_WINDOW(window), width, height);
+	gtk_widget_set_size_request(scroll, width, height);
 }
 
 static void widget_allocate(GtkWidget* widget, GdkRectangle* allocation, gpointer data) {
 	(void) data;
+	if(resize_expander) {
+		return;
+	}
+
 	if(max_height > 0) {
 		if(allocation->height > max_height) {
 			int64_t ratio = allocation->height / max_height;
@@ -411,24 +489,19 @@ static void widget_allocate(GtkWidget* widget, GdkRectangle* allocation, gpointe
 				++ratio;
 			}
 			if(ratio > 1) {
-				gtk_widget_set_size_request(widget, width, max_height * ratio);
+				gtk_widget_set_size_request(widget, -1, max_height * ratio);
 			} else {
 				max_height = allocation->height;
 			}
 		} else {
-			gtk_widget_set_size_request(widget, width, max_height);
+			gtk_widget_set_size_request(widget, -1, max_height);
 		}
 	} else {
 		max_height = allocation->height;
 	}
-	if(wl != NULL) {
-		zwlr_layer_surface_v1_set_size(wlr_surface, width, max_height * lines);
-		wl_surface_commit(wl_surface);
-		wl_display_roundtrip(wl);
+	if(lines > 0) {
+		update_surface_size();
 	}
-
-	gtk_window_resize(GTK_WINDOW(window), width, max_height * lines);
-	gtk_widget_set_size_request(scroll, width, max_height * lines);
 }
 
 static gboolean _insert_widget(gpointer data) {
@@ -442,11 +515,18 @@ static gboolean _insert_widget(gpointer data) {
 	if(node == NULL) {
 		return FALSE;
 	}
+
 	GtkWidget* parent;
 	if(node->action_count > 1 && !no_actions) {
 		parent = gtk_expander_new("");
 		g_signal_connect(parent, "activate", G_CALLBACK(expand), NULL);
-		GtkWidget* box = create_label(node->mode, node->text[0], node->search_text, node->actions[0]);
+		GtkWidget* box;
+		if(node->builder == NULL) {
+			box = create_label(node->mode, node->text[0], node->search_text, node->actions[0]);
+		} else {
+			box = GTK_WIDGET(node->builder->box);
+			setup_label(node->builder->mode->name, WOFI_PROPERTY_BOX(box));
+		}
 		gtk_expander_set_label_widget(GTK_EXPANDER(parent), box);
 
 		GtkWidget* exp_box = gtk_list_box_new();
@@ -454,7 +534,12 @@ static gboolean _insert_widget(gpointer data) {
 		g_signal_connect(exp_box, "row-activated", G_CALLBACK(activate_item), NULL);
 		gtk_container_add(GTK_CONTAINER(parent), exp_box);
 		for(size_t count = 1; count < node->action_count; ++count) {
-			box = create_label(node->mode, node->text[count], node->search_text, node->actions[count]);
+			if(node->builder == NULL) {
+				box = create_label(node->mode, node->text[count], node->search_text, node->actions[count]);
+			} else {
+				box = GTK_WIDGET(node->builder[count].box);
+				setup_label(node->builder->mode->name, WOFI_PROPERTY_BOX(box));
+			}
 
 			GtkWidget* row = gtk_list_box_row_new();
 			gtk_widget_set_name(row, "entry");
@@ -463,26 +548,23 @@ static gboolean _insert_widget(gpointer data) {
 			gtk_container_add(GTK_CONTAINER(exp_box), row);
 		}
 	} else {
-		parent = create_label(node->mode, node->text[0], node->search_text, node->actions[0]);
-	}
-	gtk_widget_set_halign(parent, content_halign);
-	GtkWidget* child = gtk_flow_box_child_new();
-	gtk_widget_set_name(child, "entry");
-	if(lines > 0) {
-		g_signal_connect(child, "size-allocate", G_CALLBACK(widget_allocate), NULL);
-	}
-
-	size_t lf_count = 1;
-	size_t text_len = strlen(node->text[0]);
-	for(size_t count = 0; count < text_len; ++count) {
-		if(node->text[0][count] == '\n') {
-			++lf_count;
+		if(node->builder == NULL) {
+			parent = create_label(node->mode, node->text[0], node->search_text, node->actions[0]);
+		} else {
+			parent = GTK_WIDGET(node->builder->box);
+			setup_label(node->builder->mode->name, WOFI_PROPERTY_BOX(parent));
 		}
 	}
 
+	gtk_widget_set_halign(parent, content_halign);
+	GtkWidget* child = gtk_flow_box_child_new();
+	gtk_widget_set_name(child, "entry");
+	g_signal_connect(child, "size-allocate", G_CALLBACK(widget_allocate), NULL);
+
 	gtk_container_add(GTK_CONTAINER(child), parent);
-	gtk_container_add(GTK_CONTAINER(inner_box), child);
 	gtk_widget_show_all(child);
+	gtk_container_add(GTK_CONTAINER(inner_box), child);
+	++line_count;
 
 	if(!user_moved) {
 		GtkFlowBoxChild* child = gtk_flow_box_get_child_at_index(GTK_FLOW_BOX(inner_box), 0);
@@ -495,24 +577,28 @@ static gboolean _insert_widget(gpointer data) {
 		gtk_widget_set_visible(box, FALSE);
 	}
 
-	free(node->mode);
-	for(size_t count = 0; count < node->action_count; ++count) {
-		free(node->text[count]);
+	if(node->builder != NULL) {
+		wofi_widget_builder_free(node->builder);
+	} else {
+		free(node->mode);
+		for(size_t count = 0; count < node->action_count; ++count) {
+			free(node->text[count]);
+		}
+		free(node->text);
+		free(node->search_text);
+		for(size_t count = 0; count < node->action_count; ++count) {
+			free(node->actions[count]);
+		}
+		free(node->actions);
+		free(node);
 	}
-	free(node->text);
-	free(node->search_text);
-	for(size_t count = 0; count < node->action_count; ++count) {
-		free(node->actions[count]);
-	}
-	free(node->actions);
-	free(node);
 	return TRUE;
 }
 
 static gboolean insert_all_widgets(gpointer data) {
+	pthread_join(mode_thread, NULL);
 	struct wl_list* modes = data;
 	if(modes->prev == modes) {
-		free(modes);
 		return FALSE;
 	} else {
 		struct mode* mode = wl_container_of(modes->prev, mode, link);
@@ -702,7 +788,7 @@ struct wl_list* wofi_read_cache(struct mode* mode) {
 		free(line);
 		fclose(file);
 	}
-	while(wl_list_length(&lines) > 0) {
+	while(!wl_list_empty(&lines)) {
 		uint64_t smallest = UINT64_MAX;
 		struct cache_line* node, *smallest_node = NULL;
 		wl_list_for_each(node, &lines, link) {
@@ -723,7 +809,7 @@ struct wl_list* wofi_read_cache(struct mode* mode) {
 }
 
 struct widget* wofi_create_widget(struct mode* mode, char* text[], char* search_text, char* actions[], size_t action_count) {
-	struct widget* widget = malloc(sizeof(struct widget));
+	struct widget* widget = calloc(1, sizeof(struct widget));
 	widget->mode = strdup(mode->name);
 	widget->text = malloc(action_count * sizeof(char*));
 	for(size_t count = 0; count < action_count; ++count) {
@@ -742,6 +828,10 @@ void wofi_insert_widgets(struct mode* mode) {
 	gdk_threads_add_idle(_insert_widget, mode);
 }
 
+char* wofi_get_dso_path(struct mode* mode) {
+	return mode->dso;
+}
+
 bool wofi_allow_images(void) {
 	return allow_images;
 }
@@ -754,6 +844,10 @@ uint64_t wofi_get_image_size(void) {
 	return image_size;
 }
 
+uint64_t wofi_get_window_scale(void) {
+	return gdk_window_get_scale_factor(gtk_widget_get_window(window));
+}
+
 bool wofi_mod_shift(void) {
 	return mod_shift;
 }
@@ -764,24 +858,38 @@ bool wofi_mod_control(void) {
 
 void wofi_term_run(const char* cmd) {
 	if(terminal != NULL) {
-		execlp(terminal, terminal, "--", cmd, NULL);
+		execlp(terminal, terminal, "-e", cmd, NULL);
 	}
 	size_t term_count = sizeof(terminals) / sizeof(char*);
 	for(size_t count = 0; count < term_count; ++count) {
-		execlp(terminals[count], terminals[count], "--", cmd, NULL);
+		execlp(terminals[count], terminals[count], "-e", cmd, NULL);
 	}
 	fprintf(stderr, "No terminal emulator found please set term in config or use --term\n");
 	exit(1);
+}
+
+static void flag_box(GtkBox* box, GtkStateFlags flags) {
+	GList* selected_children = gtk_container_get_children(GTK_CONTAINER(box));
+	for(GList* list = selected_children; list != NULL; list = list->next) {
+		GtkWidget* child = list->data;
+		gtk_widget_set_state_flags(child, flags, TRUE);
+	}
+	g_list_free(selected_children);
 }
 
 static void select_item(GtkFlowBox* flow_box, gpointer data) {
 	(void) data;
 	if(previous_selection != NULL) {
 		gtk_widget_set_name(previous_selection, "unselected");
+		flag_box(GTK_BOX(previous_selection), GTK_STATE_FLAG_NORMAL);
 	}
 	GList* selected_children = gtk_flow_box_get_selected_children(flow_box);
 	GtkWidget* box = gtk_bin_get_child(GTK_BIN(selected_children->data));
 	g_list_free(selected_children);
+	if(GTK_IS_EXPANDER(box)) {
+		box = gtk_expander_get_label_widget(GTK_EXPANDER(box));
+	}
+	flag_box(GTK_BOX(box), GTK_STATE_FLAG_SELECTED);
 	gtk_widget_set_name(box, "selected");
 	previous_selection = box;
 }
@@ -824,7 +932,25 @@ static gboolean filter_proxy(GtkFlowBoxChild* row) {
 static gboolean do_filter(GtkFlowBoxChild* row, gpointer data) {
 	(void) data;
 	gboolean ret = filter_proxy(row);
+
+	if(gtk_widget_get_visible(GTK_WIDGET(row)) == !ret && dynamic_lines) {
+		if(ret) {
+			++line_count;
+		} else {
+			--line_count;
+		}
+
+		if(line_count < max_lines) {
+			lines = line_count;
+			update_surface_size();
+		} else {
+			lines = max_lines;
+			update_surface_size();
+		}
+	}
+
 	gtk_widget_set_visible(GTK_WIDGET(row), ret);
+
 	return ret;
 }
 
@@ -916,30 +1042,50 @@ static gint do_sort(GtkFlowBoxChild* child1, GtkFlowBoxChild* child2, gpointer d
 	const gchar* text2 = wofi_property_box_get_property(WOFI_PROPERTY_BOX(box2), "filter");
 	uint64_t index1 = strtol(wofi_property_box_get_property(WOFI_PROPERTY_BOX(box1), "index"), NULL, 10);
 	uint64_t index2 = strtol(wofi_property_box_get_property(WOFI_PROPERTY_BOX(box2), "index"), NULL, 10);
+
 	if(text1 == NULL || text2 == NULL) {
 		return index1 - index2;
 	}
-	if(filter == NULL || strcmp(filter, "") == 0) {
-		switch(sort_order) {
-		case SORT_ORDER_DEFAULT:
-			return index1 - index2;
-		case SORT_ORDER_ALPHABETICAL:
-			return strcmp(text1, text2);
+
+	uint64_t fallback = 0;
+	switch(sort_order) {
+	case SORT_ORDER_DEFAULT:
+		fallback = index1 - index2;
+		break;
+	case SORT_ORDER_ALPHABETICAL:
+		if(insensitive) {
+			fallback = strcasecmp(text1, text2);
+		} else {
+			fallback = strcmp(text1, text2);
 		}
+		break;
 	}
 
+	if(filter == NULL || strcmp(filter, "") == 0) {
+		return fallback;
+	}
+
+	gint primary = 0;
 	switch(matching) {
 	case MATCHING_MODE_CONTAINS:
-		return contains_sort(text1, text2);
+		primary = contains_sort(text1, text2);
+		if(primary == 0) {
+			return fallback;
+		}
+		return primary;
 	case MATCHING_MODE_FUZZY:
-		return fuzzy_sort(text1, text2);
+		primary = fuzzy_sort(text1, text2);
+		if(primary == 0) {
+			return fallback;
+		}
+		return primary;
 	default:
 		return 0;
 	}
 }
 
 static void select_first(void) {
-	GtkFlowBoxChild* child = gtk_flow_box_get_child_at_index(GTK_FLOW_BOX(inner_box), 0);
+	GtkFlowBoxChild* child = gtk_flow_box_get_child_at_index(GTK_FLOW_BOX(inner_box), 1);
 	gtk_widget_grab_focus(GTK_WIDGET(child));
 	gtk_flow_box_select_child(GTK_FLOW_BOX(inner_box), GTK_FLOW_BOX_CHILD(child));
 }
@@ -952,6 +1098,9 @@ static GdkModifierType get_mask_from_keyval(guint keyval) {
 	case GDK_KEY_Control_L:
 	case GDK_KEY_Control_R:
 		return GDK_CONTROL_MASK;
+	case GDK_KEY_Alt_L:
+	case GDK_KEY_Alt_R:
+		return GDK_MOD1_MASK;
 	default:
 		return 0;
 	}
@@ -1007,24 +1156,57 @@ static void move_backward(void) {
 	gtk_widget_child_focus(window, GTK_DIR_TAB_BACKWARD);
 }
 
+static void move_pgup(void) {
+	uint64_t lines = height / max_height;
+	for(size_t count = 0; count < lines; ++count) {
+		move_up();
+	}
+}
+
+static void move_pgdn(void) {
+	uint64_t lines = height / max_height;
+	for(size_t count = 0; count < lines; ++count) {
+		move_down();
+	}
+}
+
 static void do_exit(void) {
 	exit(1);
 }
 
-static void do_key_action(GdkEvent* event, char* mod, void (*action)(void)) {
+static void do_expand(void) {
+	GList* children = gtk_flow_box_get_selected_children(GTK_FLOW_BOX(inner_box));
+	if(children->data != NULL && gtk_widget_has_focus(children->data)) {
+		GtkWidget* expander = gtk_bin_get_child(children->data);
+		if(GTK_IS_EXPANDER(expander)) {
+			g_signal_emit_by_name(expander, "activate");
+		}
+	}
+	g_list_free(children);
+}
+
+static void do_hide_search(void) {
+	gtk_widget_set_visible(entry, !gtk_widget_get_visible(entry));
+	update_surface_size();
+}
+
+static bool do_key_action(GdkEvent* event, char* mod, void (*action)(void)) {
 	if(mod != NULL) {
 		GdkModifierType mask = get_mask_from_name(mod);
 		if((event->key.state & mask) == mask) {
 			event->key.state &= ~mask;
 			action();
+			return true;
 		}
+		return false;
 	} else {
 		action();
+		return true;
 	}
 }
 
 static bool has_mod(guint state) {
-	return (state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK || (state & GDK_CONTROL_MASK) == GDK_CONTROL_MASK;
+	return (state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK || (state & GDK_CONTROL_MASK) == GDK_CONTROL_MASK || (state & GDK_MOD1_MASK) == GDK_MOD1_MASK;
 }
 
 static gboolean do_nyan(gpointer data) {
@@ -1088,19 +1270,13 @@ static gboolean key_press(GtkWidget* widget, GdkEvent* event, gpointer data) {
 		return FALSE;
 	}
 
-	if(event->key.keyval == gdk_keyval_from_name(key_up)) {
-		do_key_action(event, mod_up, move_up);
-	} else if(event->key.keyval == gdk_keyval_from_name(key_down)) {
-		do_key_action(event, mod_down, move_down);
-	} else if(event->key.keyval == gdk_keyval_from_name(key_left)) {
-		do_key_action(event, mod_left, move_left);
-	} else if(event->key.keyval == gdk_keyval_from_name(key_right)) {
-		do_key_action(event, mod_right, move_right);
-	} else if(event->key.keyval == gdk_keyval_from_name(key_forward)) {
-		do_key_action(event, mod_forward, move_forward);
-	} else if(event->key.keyval == gdk_keyval_from_name(key_backward)) {
-		do_key_action(event, mod_backward, move_backward);
-	} else if(event->key.keyval == gdk_keyval_from_name(key_submit)) {
+
+	bool key_success = true;
+	struct key_entry* key_ent = map_get(keys, gdk_keyval_name(event->key.keyval));
+
+	if(key_ent != NULL && key_ent->action != NULL) {
+		key_success = do_key_action(event, key_ent->mod, key_ent->action);
+	} else if(key_ent != NULL) {
 		mod_shift = (event->key.state & GDK_SHIFT_MASK) == GDK_SHIFT_MASK;
 		mod_ctrl = (event->key.state & GDK_CONTROL_MASK) == GDK_CONTROL_MASK;
 		if(mod_shift) {
@@ -1121,17 +1297,20 @@ static gboolean key_press(GtkWidget* widget, GdkEvent* event, gpointer data) {
 			}
 		}
 		g_list_free(children);
-	} else if(event->key.keyval == gdk_keyval_from_name(key_exit)) {
-		do_key_action(event, mod_exit, do_exit);
-	} else if(event->key.keyval == GDK_KEY_Shift_L || event->key.keyval == GDK_KEY_Control_L) {
-	} else if(event->key.keyval == GDK_KEY_Shift_R || event->key.keyval == GDK_KEY_Control_R) {
+	} else if(event->key.keyval == GDK_KEY_Shift_L || event->key.keyval == GDK_KEY_Shift_R) {
+	} else if(event->key.keyval == GDK_KEY_Control_L || event->key.keyval == GDK_KEY_Control_R) {
+	} else if(event->key.keyval == GDK_KEY_Alt_L || event->key.keyval == GDK_KEY_Alt_R) {
 	} else {
-		if(!gtk_widget_has_focus(entry)) {
-			gtk_entry_grab_focus_without_selecting(GTK_ENTRY(entry));
-		}
-		return FALSE;
+		key_success = false;
 	}
-	return TRUE;
+
+	if(key_success) {
+		return TRUE;
+	}
+	if(!gtk_widget_has_focus(entry)) {
+		gtk_entry_grab_focus_without_selecting(GTK_ENTRY(entry));
+	}
+	return FALSE;
 }
 
 static gboolean focus(GtkWidget* widget, GdkEvent* event, gpointer data) {
@@ -1144,6 +1323,21 @@ static gboolean focus(GtkWidget* widget, GdkEvent* event, gpointer data) {
 	return FALSE;
 }
 
+static gboolean focus_entry(GtkWidget* widget, GdkEvent* event, gpointer data) {
+	(void) data;
+	if(widget == entry && dbus != NULL) {
+		GError* err = NULL;
+		g_dbus_proxy_call_sync(dbus, "SetVisible", g_variant_new("(b)", event->focus_change.in), G_DBUS_CALL_FLAGS_NONE, 2000, NULL, &err);
+		if(err != NULL) {
+			if(err->code != G_DBUS_ERROR_SERVICE_UNKNOWN) {
+				fprintf(stderr, "Error while changing OSK state %s\n", err->message);
+			}
+			g_error_free(err);
+		}
+	}
+	return FALSE;
+}
+
 static void* get_plugin_proc(const char* prefix, const char* suffix) {
 	char* proc_name = utils_concat(3, "wofi_", prefix, suffix);
 	void* proc = dlsym(RTLD_DEFAULT, proc_name);
@@ -1151,17 +1345,20 @@ static void* get_plugin_proc(const char* prefix, const char* suffix) {
 	return proc;
 }
 
-static void* load_mode(char* _mode, struct mode* mode_ptr, struct map* props) {
+static void* load_mode(char* _mode, char* name, struct mode* mode_ptr, struct map* props) {
 	char* dso = strstr(_mode, ".so");
 
-	mode_ptr->name = strdup(_mode);
+	mode_ptr->name = strdup(name);
 
 	void (*init)(struct mode* _mode, struct map* props);
+	void (*load)(struct mode* _mode);
 	const char** (*get_arg_names)(void);
 	size_t (*get_arg_count)(void);
 	bool (*no_entry)(void);
 	if(dso == NULL) {
+		mode_ptr->dso = NULL;
 		init = get_plugin_proc(_mode, "_init");
+		load = get_plugin_proc(_mode, "_load");
 		get_arg_names = get_plugin_proc(_mode, "_get_arg_names");
 		get_arg_count = get_plugin_proc(_mode, "_get_arg_count");
 		mode_ptr->mode_exec = get_plugin_proc(_mode, "_exec");
@@ -1170,15 +1367,21 @@ static void* load_mode(char* _mode, struct mode* mode_ptr, struct map* props) {
 	} else {
 		char* plugins_dir = utils_concat(2, config_dir, "/plugins/");
 		char* full_name = utils_concat(2, plugins_dir, _mode);
+		mode_ptr->dso = strdup(full_name);
 		void* plugin = dlopen(full_name, RTLD_LAZY | RTLD_LOCAL);
 		free(full_name);
 		free(plugins_dir);
 		init = dlsym(plugin, "init");
+		load = dlsym(plugin, "load");
 		get_arg_names = dlsym(plugin, "get_arg_names");
 		get_arg_count = dlsym(plugin, "get_arg_count");
 		mode_ptr->mode_exec = dlsym(plugin, "exec");
 		mode_ptr->mode_get_widget = dlsym(plugin, "get_widget");
 		no_entry = dlsym(plugin, "no_entry");
+	}
+
+	if(load != NULL) {
+		load(mode_ptr);
 	}
 
 	const char** arg_names = NULL;
@@ -1189,12 +1392,12 @@ static void* load_mode(char* _mode, struct mode* mode_ptr, struct map* props) {
 	}
 
 	if(mode == NULL && no_entry != NULL && no_entry()) {
-		mode = _mode;
+		mode = mode_ptr->name;
 	}
 
 	for(size_t count = 0; count < arg_count; ++count) {
 		const char* arg = arg_names[count];
-		char* full_name = utils_concat(3, _mode, "-", arg);
+		char* full_name = utils_concat(3, name, "-", arg);
 		map_put(props, arg, config_get(config, full_name, NULL));
 		free(full_name);
 	}
@@ -1204,23 +1407,38 @@ static void* load_mode(char* _mode, struct mode* mode_ptr, struct map* props) {
 static struct mode* add_mode(char* _mode) {
 	struct mode* mode_ptr = calloc(1, sizeof(struct mode));
 	struct map* props = map_init();
-	void (*init)(struct mode* _mode, struct map* props) = load_mode(_mode, mode_ptr, props);
+	void (*init)(struct mode* _mode, struct map* props) = load_mode(_mode, _mode, mode_ptr, props);
 
 	if(init == NULL) {
 		free(mode_ptr->name);
+		free(mode_ptr->dso);
 		free(mode_ptr);
 		map_free(props);
 
 		mode_ptr = calloc(1, sizeof(struct mode));
 		props = map_init();
 
-		init = load_mode("external", mode_ptr, props);
-
-		map_put(props, "exec", _mode);
+		char* name = utils_concat(3, "lib", _mode, ".so");
+		init = load_mode(name, _mode, mode_ptr, props);
+		free(name);
 
 		if(init == NULL) {
-			fprintf(stderr, "I would love to show %s but Idk what it is\n", _mode);
-			exit(1);
+			free(mode_ptr->name);
+			free(mode_ptr->dso);
+			free(mode_ptr);
+			map_free(props);
+
+			mode_ptr = calloc(1, sizeof(struct mode));
+			props = map_init();
+
+			init = load_mode("external", _mode, mode_ptr, props);
+
+			map_put(props, "exec", _mode);
+
+			if(init == NULL) {
+				fprintf(stderr, "I would love to show %s but Idk what it is\n", _mode);
+				exit(1);
+			}
 		}
 	}
 	map_put_void(modes, _mode, mode_ptr);
@@ -1230,45 +1448,58 @@ static struct mode* add_mode(char* _mode) {
 	return mode_ptr;
 }
 
-static void* start_thread(void* data) {
+static void* start_mode_thread(void* data) {
 	char* mode = data;
-
-	struct wl_list* modes = malloc(sizeof(struct wl_list));
-	wl_list_init(modes);
-
 	if(strchr(mode, ',') != NULL) {
 		char* save_ptr;
 		char* str = strtok_r(mode, ",", &save_ptr);
 		do {
 			struct mode* mode_ptr = add_mode(str);
-			wl_list_insert(modes, &mode_ptr->link);
+			wl_list_insert(&mode_list, &mode_ptr->link);
 		} while((str = strtok_r(NULL, ",", &save_ptr)) != NULL);
 	} else {
 		struct mode* mode_ptr = add_mode(mode);
-		wl_list_insert(modes, &mode_ptr->link);
+		wl_list_insert(&mode_list, &mode_ptr->link);
 	}
-	gdk_threads_add_idle(insert_all_widgets, modes);
 	return NULL;
 }
 
-static void parse_mods(char** key, char** mod) {
-	char* hyphen = strchr(*key, '-');
-	if(hyphen != NULL) {
-		*hyphen = 0;
-		guint key1 = gdk_keyval_from_name(*key);
-		guint key2 = gdk_keyval_from_name(hyphen + 1);
-		if(get_mask_from_keyval(key1) != 0) {
-			*mod = *key;
-			*key = hyphen + 1;
-		} else if(get_mask_from_keyval(key2) != 0) {
-			*mod = hyphen + 1;
-		} else {
-			fprintf(stderr, "Neither %s nor %s is a modifier, this is not supported\n", *key, hyphen + 1);
-			*mod = NULL;
+static void parse_mods(char* key, void (*action)(void)) {
+	char* tmp = strdup(key);
+	char* save_ptr;
+	char* str = strtok_r(tmp, ",", &save_ptr);
+	do {
+		if(str == NULL) {
+			break;
 		}
-	} else {
-		*mod = NULL;
-	}
+		char* hyphen = strchr(str, '-');
+		char* mod;
+		if(hyphen != NULL) {
+			*hyphen = 0;
+			guint key1 = gdk_keyval_from_name(str);
+			guint key2 = gdk_keyval_from_name(hyphen + 1);
+			if(get_mask_from_keyval(key1) != 0) {
+				mod = str;
+				str = hyphen + 1;
+			} else if(get_mask_from_keyval(key2) != 0) {
+				mod = hyphen + 1;
+			} else {
+				fprintf(stderr, "Neither %s nor %s is a modifier, this is not supported\n", str, hyphen + 1);
+				mod = NULL;
+			}
+		} else {
+			mod = NULL;
+		}
+		struct key_entry* entry = malloc(sizeof(struct key_entry));
+		if(mod == NULL) {
+			entry->mod = NULL;
+		} else {
+			entry->mod = strdup(mod);
+		}
+		entry->action = action;
+		map_put_void(keys, str, entry);
+	} while((str = strtok_r(NULL, ",", &save_ptr)) != NULL);
+	free(tmp);
 }
 
 static void get_output_name(void* data, struct zxdg_output_v1* output, const char* name) {
@@ -1291,10 +1522,40 @@ static void get_output_pos(void* data, struct zxdg_output_v1* output, int32_t x,
 	node->y = y;
 }
 
+static gboolean do_percent_size(gpointer data) {
+	char** geo_str = data;
+	bool width_percent = strchr(geo_str[0], '%') != NULL;
+	bool height_percent = strchr(geo_str[1], '%') != NULL && lines == 0;
+
+	GdkMonitor* monitor = gdk_display_get_monitor_at_window(gdk_display_get_default(), gtk_widget_get_window(window));
+
+	GdkRectangle rect;
+	gdk_monitor_get_geometry(monitor, &rect);
+
+	if(rect.width == resolution.width && rect.height == resolution.height) {
+		return G_SOURCE_CONTINUE;
+	}
+
+	resolution = rect;
+
+	if(width_percent) {
+		uint64_t w_percent = strtol(geo_str[0], NULL, 10);
+		width = (w_percent / 100.f) * rect.width;
+	}
+	if(height_percent) {
+		uint64_t h_percent = strtol(geo_str[1], NULL, 10);
+		height = (h_percent / 100.f) * rect.height;
+	}
+	update_surface_size();
+	return G_SOURCE_CONTINUE;
+}
+
 void wofi_init(struct map* _config) {
 	config = _config;
-	width = strtol(config_get(config, "width", "1000"), NULL, 10);
-	height = strtol(config_get(config, "height", "400"), NULL, 10);
+	char* width_str = config_get(config, "width", "50%");
+	char* height_str = config_get(config, "height", "40%");
+	width = strtol(width_str, NULL, 10);
+	height = strtol(height_str, NULL, 10);
 	x = map_get(config, "x");
 	y = map_get(config, "y");
 	bool normal_window = strcmp(config_get(config, "normal_window", "false"), "true") == 0;
@@ -1327,28 +1588,46 @@ void wofi_init(struct map* _config) {
 			"0", "1", "2", "3", "4", "5", "6", "7", "8");
 	no_actions = strcmp(config_get(config, "no_actions", "false"), "true") == 0;
 	lines = strtol(config_get(config, "lines", "0"), NULL, 10);
+	max_lines = lines;
 	columns = strtol(config_get(config, "columns", "1"), NULL, 10);
 	sort_order = config_get_mnemonic(config, "sort_order", "default", 2, "default", "alphabetical");
 	line_wrap = config_get_mnemonic(config, "line_wrap", "off", 4, "off", "word", "char", "word_char") - 1;
 	bool global_coords = strcmp(config_get(config, "global_coords", "false"), "true") == 0;
 	bool hide_search = strcmp(config_get(config, "hide_search", "false"), "true") == 0;
+	char* search = map_get(config, "search");
+	dynamic_lines = strcmp(config_get(config, "dynamic_lines", "false"), "true") == 0;
+	char* monitor = map_get(config, "monitor");
+	char* layer = config_get(config, "layer", "top");
 
-	key_up = config_get(config, "key_up", "Up");
-	key_down = config_get(config, "key_down", "Down");
-	key_left = config_get(config, "key_left", "Left");
-	key_right = config_get(config, "key_right", "Right");
-	key_forward = config_get(config, "key_forward", "Tab");
-	key_backward = config_get(config, "key_backward", "ISO_Left_Tab");
-	key_submit = config_get(config, "key_submit", "Return");
-	key_exit = config_get(config, "key_exit", "Escape");
+	keys = map_init_void();
 
-	parse_mods(&key_up, &mod_up);
-	parse_mods(&key_down, &mod_down);
-	parse_mods(&key_left, &mod_left);
-	parse_mods(&key_right, &mod_right);
-	parse_mods(&key_forward, &mod_forward);
-	parse_mods(&key_backward, &mod_backward);
-	parse_mods(&key_exit, &mod_exit);
+
+
+	char* key_up = config_get(config, "key_up", "Up");
+	char* key_down = config_get(config, "key_down", "Down");
+	char* key_left = config_get(config, "key_left", "Left");
+	char* key_right = config_get(config, "key_right", "Right");
+	char* key_forward = config_get(config, "key_forward", "Tab");
+	char* key_backward = config_get(config, "key_backward", "ISO_Left_Tab");
+	char* key_submit = config_get(config, "key_submit", "Return");
+	char* key_exit = config_get(config, "key_exit", "Escape");
+	char* key_pgup = config_get(config, "key_pgup", "Page_Up");
+	char* key_pgdn = config_get(config, "key_pgdn", "Page_Down");
+	char* key_expand = config_get(config, "key_expand", "");
+	char* key_hide_search = config_get(config, "key_hide_search", "");
+
+	parse_mods(key_up, move_up);
+	parse_mods(key_down, move_down);
+	parse_mods(key_left, move_left);
+	parse_mods(key_right, move_right);
+	parse_mods(key_forward, move_forward);
+	parse_mods(key_backward, move_backward);
+	parse_mods(key_submit, NULL); //submit is a special case, when a NULL action is encountered submit is used instead
+	parse_mods(key_exit, do_exit);
+	parse_mods(key_pgup, move_pgup);
+	parse_mods(key_pgdn, move_pgdn);
+	parse_mods(key_expand, do_expand);
+	parse_mods(key_hide_search, do_hide_search);
 
 	modes = map_init_void();
 
@@ -1363,10 +1642,17 @@ void wofi_init(struct map* _config) {
 	gtk_window_resize(GTK_WINDOW(window), width, height);
 	gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
 	gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+
 	if(!normal_window) {
-		wl_list_init(&outputs);
 		GdkDisplay* disp = gdk_display_get_default();
+		wl_list_init(&outputs);
 		wl = gdk_wayland_display_get_wl_display(disp);
+
+		if(wl == NULL) {
+			fprintf(stderr, "Failed to connect to wayland compositor\n");
+			exit(1);
+		}
+
 		struct wl_registry* registry = wl_display_get_registry(wl);
 		struct wl_registry_listener listener = {
 			.global = add_interface,
@@ -1374,6 +1660,12 @@ void wofi_init(struct map* _config) {
 		};
 		wl_registry_add_listener(registry, &listener, NULL);
 		wl_display_roundtrip(wl);
+
+		if(shell == NULL) {
+			fprintf(stderr, "Compositor does not support wlr_layer_shell protocol, switching to normal window mode\n");
+			normal_window = true;
+			goto normal_win;
+		}
 
 		struct output_node* node;
 		wl_list_for_each(node, &outputs, link) {
@@ -1402,13 +1694,33 @@ void wofi_init(struct map* _config) {
 					break;
 				}
 			}
+		} else if(monitor != NULL) {
+			wl_list_for_each(node, &outputs, link) {
+				if(strcmp(monitor, node->name) == 0) {
+					output = node->output;
+					break;
+				}
+			}
 		}
 
 		GdkWindow* gdk_win = gtk_widget_get_window(window);
+
 		gdk_wayland_window_set_use_custom_surface(gdk_win);
 		wl_surface = gdk_wayland_window_get_wl_surface(gdk_win);
 
-		wlr_surface = zwlr_layer_shell_v1_get_layer_surface(shell, wl_surface, output, ZWLR_LAYER_SHELL_V1_LAYER_TOP, "wofi");
+		enum zwlr_layer_shell_v1_layer wlr_layer = ZWLR_LAYER_SHELL_V1_LAYER_TOP;
+
+		if(strcmp(layer, "background") == 0) {
+			wlr_layer = ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND;
+		} else if(strcmp(layer, "bottom") == 0) {
+			wlr_layer = ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM;
+		} else if(strcmp(layer, "top") == 0) {
+			wlr_layer = ZWLR_LAYER_SHELL_V1_LAYER_TOP;
+		} else if(strcmp(layer, "overlay") == 0) {
+			wlr_layer = ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY;
+		}
+
+		wlr_surface = zwlr_layer_shell_v1_get_layer_surface(shell, wl_surface, output, wlr_layer, "wofi");
 		struct zwlr_layer_surface_v1_listener* surface_listener = malloc(sizeof(struct zwlr_layer_surface_v1_listener));
 		surface_listener->configure = config_surface;
 		surface_listener->closed = nop;
@@ -1417,6 +1729,8 @@ void wofi_init(struct map* _config) {
 		wl_display_roundtrip(wl);
 	}
 
+	normal_win:
+
 	outer_box = gtk_box_new(outer_orientation, 0);
 	gtk_widget_set_name(outer_box, "outer-box");
 	gtk_container_add(GTK_CONTAINER(window), outer_box);
@@ -1424,9 +1738,13 @@ void wofi_init(struct map* _config) {
 
 	gtk_widget_set_name(entry, "input");
 	gtk_entry_set_placeholder_text(GTK_ENTRY(entry), prompt);
-	if(!hide_search) {
-		gtk_container_add(GTK_CONTAINER(outer_box), entry);
+	gtk_container_add(GTK_CONTAINER(outer_box), entry);
+	gtk_widget_set_child_visible(entry, !hide_search);
+
+	if(search != NULL) {
+		gtk_entry_set_text(GTK_ENTRY(entry), search);
 	}
+
 	if(password_char != NULL) {
 		gtk_entry_set_visibility(GTK_ENTRY(entry), FALSE);
 		gtk_entry_set_invisible_char(GTK_ENTRY(entry), password_char[0]);
@@ -1441,6 +1759,7 @@ void wofi_init(struct map* _config) {
 	}
 
 	inner_box = gtk_flow_box_new();
+	gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(inner_box), GTK_SELECTION_BROWSE);
 	gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(inner_box), columns);
 	gtk_orientable_set_orientation(GTK_ORIENTABLE(inner_box), orientation);
 	gtk_widget_set_halign(inner_box, halign);
@@ -1470,11 +1789,31 @@ void wofi_init(struct map* _config) {
 	g_signal_connect(window, "key-press-event", G_CALLBACK(key_press), NULL);
 	g_signal_connect(window, "focus-in-event", G_CALLBACK(focus), NULL);
 	g_signal_connect(window, "focus-out-event", G_CALLBACK(focus), NULL);
+	g_signal_connect(entry, "focus-in-event", G_CALLBACK(focus_entry), NULL);
+	g_signal_connect(entry, "focus-out-event", G_CALLBACK(focus_entry), NULL);
+	g_signal_connect(window, "destroy", G_CALLBACK(do_exit), NULL);
+
+	dbus = g_dbus_proxy_new_for_bus_sync(G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL, "sm.puri.OSK0", "/sm/puri/OSK0", "sm.puri.OSK0", NULL, NULL);
 
 	gdk_threads_add_timeout(filter_rate, do_search, NULL);
 
-	pthread_t thread;
-	pthread_create(&thread, NULL, start_thread, mode);
+
+	bool width_percent = strchr(width_str, '%') != NULL;
+	bool height_percent = strchr(height_str, '%') != NULL && lines == 0;
+	if(width_percent || height_percent) {
+		static char* geo_str[2];
+		geo_str[0] = width_str;
+		geo_str[1] = height_str;
+		gdk_threads_add_timeout(50, do_percent_size, geo_str);
+		do_percent_size(geo_str);
+	}
+
+	wl_list_init(&mode_list);
+
+	pthread_create(&mode_thread, NULL, start_mode_thread, mode);
+
+	gdk_threads_add_idle(insert_all_widgets, &mode_list);
+
 	gtk_window_set_title(GTK_WINDOW(window), prompt);
 	gtk_widget_show_all(window);
 }

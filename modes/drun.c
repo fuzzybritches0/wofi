@@ -15,60 +15,34 @@
     along with Wofi.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <wofi.h>
+#include <stdio.h>
+#include <libgen.h>
 
+#include <sys/stat.h>
+
+#include <map.h>
+#include <utils.h>
+#include <config.h>
+#include <utils_g.h>
+#include <widget_builder_api.h>
+
+#include <gtk/gtk.h>
 #include <gio/gdesktopappinfo.h>
 
-static const char* arg_names[] = {"print_command"};
+static const char* arg_names[] = {"print_command", "display_generic"};
 
 static struct mode* mode;
 
-struct node {
-	struct widget* widget;
+struct desktop_entry {
+	char* full_path;
 	struct wl_list link;
 };
 
-static struct wl_list widgets;
+static struct map* entries;
+static struct wl_list desktop_entries;
 
 static bool print_command;
-
-static char* get_text(char* file, char* action) {
-	GDesktopAppInfo* info = g_desktop_app_info_new_from_filename(file);
-	if(info == NULL || g_desktop_app_info_get_is_hidden(info) || g_desktop_app_info_get_nodisplay(info)) {
-		return NULL;
-	}
-	const char* name;
-	if(action == NULL) {
-		name = g_app_info_get_display_name(G_APP_INFO(info));
-	} else {
-		name = g_desktop_app_info_get_action_name(info, action);
-	}
-	if(name == NULL) {
-		return NULL;
-	}
-	if(wofi_allow_images()) {
-		GIcon* icon = g_app_info_get_icon(G_APP_INFO(info));
-		if(G_IS_FILE_ICON(icon)) {
-			GFile* file = g_file_icon_get_file(G_FILE_ICON(icon));
-			char* path = g_file_get_path(file);
-			return utils_concat(4, "img:", path, ":text:", name);
-		} else {
-			GtkIconTheme* theme = gtk_icon_theme_get_default();
-			GtkIconInfo* info = NULL;
-			if(icon != NULL) {
-				const gchar* const* icon_names = g_themed_icon_get_names(G_THEMED_ICON(icon));
-				info = gtk_icon_theme_choose_icon(theme, (const gchar**) icon_names, wofi_get_image_size(), 0);
-			}
-			if(info == NULL) {
-				info = gtk_icon_theme_lookup_icon(theme, "application-x-executable", wofi_get_image_size(), 0);
-			}
-			const gchar* icon_path = gtk_icon_info_get_filename(info);
-			return utils_concat(4, "img:", icon_path, ":text:", name);
-		}
-	} else {
-		return strdup(name);
-	}
-}
+static bool display_generic;
 
 static char* get_search_text(char* file) {
 	GDesktopAppInfo* info = g_desktop_app_info_new_from_filename(file);
@@ -99,6 +73,77 @@ static char* get_search_text(char* file) {
 	return ret;
 }
 
+static bool populate_widget(char* file, char* action, struct widget_builder* builder) {
+	GDesktopAppInfo* info = g_desktop_app_info_new_from_filename(file);
+	if(info == NULL || g_desktop_app_info_get_is_hidden(info) || g_desktop_app_info_get_nodisplay(info)) {
+		return false;
+	}
+	const char* name;
+	char* generic_name = strdup("");
+	if(action == NULL) {
+		name = g_app_info_get_display_name(G_APP_INFO(info));
+		if(display_generic) {
+			const char* gname = g_desktop_app_info_get_generic_name(info);
+			if(gname != NULL) {
+				free(generic_name);
+				generic_name = utils_concat(3, " (", gname, ")");
+			}
+		}
+	} else {
+		name = g_desktop_app_info_get_action_name(info, action);
+	}
+	if(name == NULL) {
+		free(generic_name);
+		return false;
+	}
+
+
+
+	if(wofi_allow_images()) {
+		GIcon* icon = g_app_info_get_icon(G_APP_INFO(info));
+		GdkPixbuf* pixbuf;
+		if(G_IS_FILE_ICON(icon)) {
+			GFile* file = g_file_icon_get_file(G_FILE_ICON(icon));
+			char* path = g_file_get_path(file);
+			pixbuf = gdk_pixbuf_new_from_file(path, NULL);
+		} else {
+			GtkIconTheme* theme = gtk_icon_theme_get_default();
+			GtkIconInfo* info = NULL;
+			if(icon != NULL) {
+				const gchar* const* icon_names = g_themed_icon_get_names(G_THEMED_ICON(icon));
+				info = gtk_icon_theme_choose_icon_for_scale(theme, (const gchar**) icon_names, wofi_get_image_size(), wofi_get_window_scale(), 0);
+			}
+			if(info == NULL) {
+				info = gtk_icon_theme_lookup_icon_for_scale(theme, "application-x-executable", wofi_get_image_size(), wofi_get_window_scale(), 0);
+			}
+			pixbuf = gtk_icon_info_load_icon(info, NULL);
+		}
+
+		pixbuf = utils_g_resize_pixbuf(pixbuf, wofi_get_image_size() * wofi_get_window_scale(), GDK_INTERP_BILINEAR);
+
+		wofi_widget_builder_insert_image(builder, pixbuf, "icon", NULL);
+		g_object_unref(pixbuf);
+	}
+	wofi_widget_builder_insert_text(builder, name, "name", NULL);
+	wofi_widget_builder_insert_text(builder, generic_name, "generic-name", NULL);
+	free(generic_name);
+
+	if(action == NULL) {
+		wofi_widget_builder_set_action(builder, file);
+	} else {
+		char* action_txt = utils_concat(3, file, " ", action);
+		wofi_widget_builder_set_action(builder, action_txt);
+		free(action_txt);
+	}
+
+
+	char* search_txt = get_search_text(file);
+	wofi_widget_builder_set_search_text(builder, search_txt);
+	free(search_txt);
+
+	return true;
+}
+
 static const gchar* const* get_actions(char* file, size_t* action_count) {
 	*action_count = 0;
 	GDesktopAppInfo* info = g_desktop_app_info_new_from_filename(file);
@@ -115,44 +160,22 @@ static const gchar* const* get_actions(char* file, size_t* action_count) {
 	return actions;
 }
 
-static char** get_action_text(char* file, size_t* text_count) {
-	*text_count = 0;
-
-	char* tmp = get_text(file, NULL);
-	if(tmp == NULL) {
-		return NULL;
-	}
-
+static struct widget_builder* populate_actions(char* file, size_t* text_count) {
 	const gchar* const* action_names = get_actions(file, text_count);
 
 	++*text_count;
-	char** text = malloc(*text_count * sizeof(char*));
-	text[0] = tmp;
 
-	for(size_t count = 1; count < *text_count; ++count) {
-		text[count] = get_text(file, (gchar*) action_names[count - 1]);
-	}
-	return text;
-}
 
-static char** get_action_actions(char* file, size_t* action_count) {
-	*action_count = 0;
-
-	char* tmp = strdup(file);
-	if(tmp == NULL) {
+	struct widget_builder* builder = wofi_widget_builder_init(mode, *text_count);
+	if(!populate_widget(file, NULL, builder)) {
+		wofi_widget_builder_free(builder);
 		return NULL;
 	}
 
-	const gchar* const* action_names = get_actions(file, action_count);
-
-	++*action_count;
-	char** actions = malloc(*action_count * sizeof(char*));
-	actions[0] = tmp;
-
-	for(size_t count = 1; count < *action_count; ++count) {
-		actions[count] = utils_concat(3, file, " ", (gchar*) action_names[count - 1]);
+	for(size_t count = 1; count < *text_count; ++count) {
+		populate_widget(file, (gchar*) action_names[count - 1], wofi_widget_builder_get_idx(builder, count));
 	}
-	return actions;
+	return builder;
 }
 
 static char* get_id(char* path) {
@@ -167,7 +190,36 @@ static char* get_id(char* path) {
 	return id;
 }
 
-static void insert_dir(char* app_dir, struct map* cached, struct map* entries) {
+static struct widget* create_widget(char* full_path) {
+	char* id = get_id(full_path);
+
+	if(map_contains(entries, id)) {
+		free(id);
+		free(full_path);
+		return NULL;
+	}
+
+	map_put(entries, id, "true");
+
+	size_t action_count;
+
+	struct widget_builder* builder = populate_actions(full_path, &action_count);
+	if(builder == NULL) {
+		wofi_remove_cache(mode, full_path);
+		free(id);
+		free(full_path);
+		return NULL;
+	}
+
+	struct widget* ret = wofi_widget_builder_get_widget(builder);
+
+	free(id);
+	free(full_path);
+
+	return ret;
+}
+
+static void insert_dir(char* app_dir) {
 	DIR* dir = opendir(app_dir);
 	if(dir == NULL) {
 		return;
@@ -183,12 +235,7 @@ static void insert_dir(char* app_dir, struct map* cached, struct map* entries) {
 		struct stat info;
 		stat(full_path, &info);
 		if(S_ISDIR(info.st_mode)) {
-			insert_dir(full_path, cached, entries);
-			free(id);
-			free(full_path);
-			continue;
-		}
-		if(map_contains(cached, id)) {
+			insert_dir(full_path);
 			free(id);
 			free(full_path);
 			continue;
@@ -198,118 +245,129 @@ static void insert_dir(char* app_dir, struct map* cached, struct map* entries) {
 			free(full_path);
 			continue;
 		}
-		size_t action_count;
-		char** text = get_action_text(full_path, &action_count);
-		map_put(entries, id, "true");
-		if(text == NULL) {
-			free(id);
-			free(full_path);
-			continue;
-		}
 
-		char** actions = get_action_actions(full_path, &action_count);
-
-		char* search_text = get_search_text(full_path);
-
-		struct node* node = malloc(sizeof(struct node));
-		node->widget = wofi_create_widget(mode, text, search_text, actions, action_count);
-		wl_list_insert(&widgets, &node->link);
-
-		for(size_t count = 0; count < action_count; ++count) {
-			free(actions[count]);
-			free(text[count]);
-		}
+		struct desktop_entry* entry = malloc(sizeof(struct desktop_entry));
+		entry->full_path = full_path;
+		wl_list_insert(&desktop_entries, &entry->link);
 
 		free(id);
-		free(text);
-		free(actions);
-		free(search_text);
-		free(full_path);
 	}
 	closedir(dir);
 }
 
-void wofi_drun_init(struct mode* this, struct map* config) {
-	mode = this;
-
-	print_command = strcmp(config_get(config, "print_command", "false"), "true") == 0;
-
-	struct map* cached = map_init();
-	struct map* entries = map_init();
-	struct wl_list* cache = wofi_read_cache(mode);
-
-	wl_list_init(&widgets);
-
-	struct cache_line* node, *tmp;
-	wl_list_for_each_safe(node, tmp, cache, link) {
-		size_t action_count;
-		char** text = get_action_text(node->line, &action_count);
-		if(text == NULL) {
-			wofi_remove_cache(mode, node->line);
-			goto cache_cont;
-		}
-
-		char** actions = get_action_actions(node->line, &action_count);
-
-		char* search_text = get_search_text(node->line);
-		struct node* widget = malloc(sizeof(struct node));
-		widget->widget = wofi_create_widget(mode, text, search_text, actions, action_count);
-		wl_list_insert(&widgets, &widget->link);
-
-		char* id = get_id(node->line);
-
-		map_put(cached, id, "true");
-
-		free(id);
-
-		free(search_text);
-
-		for(size_t count = 0; count < action_count; ++count) {
-			free(text[count]);
-			free(actions[count]);
-		}
-		free(text);
-		free(actions);
-
-		cache_cont:
-		free(node->line);
-		wl_list_remove(&node->link);
-		free(node);
+static char* get_data_dirs(void) {
+	char* data_dirs = getenv("XDG_DATA_DIRS");
+	if(data_dirs == NULL) {
+		data_dirs = "/usr/local/share:/usr/share";
 	}
+	return strdup(data_dirs);
+}
 
-	free(cache);
-
+static char* get_data_home(void) {
 	char* data_home = getenv("XDG_DATA_HOME");
 	if(data_home == NULL) {
 		data_home = utils_concat(2, getenv("HOME"), "/.local/share");
 	} else {
 		data_home = strdup(data_home);
 	}
-	char* data_dirs = getenv("XDG_DATA_DIRS");
-	if(data_dirs == NULL) {
-		data_dirs = "/usr/local/share:/usr/share";
+	return data_home;
+}
+
+static bool starts_with_data_dirs(char* path) {
+	char* data_dirs = get_data_dirs();
+	char* save_ptr;
+	char* str = strtok_r(data_dirs, ":", &save_ptr);
+	do {
+		char* tmpstr = utils_concat(2, str, "/applications");
+		char* tmp = strdup(path);
+		char* dir = dirname(tmp);
+		if(strcmp(dir, tmpstr) == 0) {
+			free(tmp);
+			free(data_dirs);
+			free(tmpstr);
+			return true;
+		}
+		free(tmp);
+		free(tmpstr);
+	} while((str = strtok_r(NULL, ":", &save_ptr)) != NULL);
+
+	free(data_dirs);
+	return false;
+}
+
+static bool should_invalidate_cache(char* path) {
+	if(starts_with_data_dirs(path)) {
+		char* data_home = get_data_home();
+		char* tmp = strdup(path);
+		char* file = basename(tmp);
+		char* full_path = utils_concat(3, data_home, "/applications/", file);
+		free(data_home);
+		if(access(full_path, F_OK) == 0) {
+			free(full_path);
+			free(tmp);
+			return true;
+		}
+		free(full_path);
+		free(tmp);
 	}
+	return false;
+}
+
+void wofi_drun_init(struct mode* this, struct map* config) {
+	mode = this;
+
+	print_command = strcmp(config_get(config, "print_command", "false"), "true") == 0;
+	display_generic = strcmp(config_get(config, "display_generic", "false"), "true") == 0;
+
+	entries = map_init();
+	struct wl_list* cache = wofi_read_cache(mode);
+
+	wl_list_init(&desktop_entries);
+
+	struct cache_line* node, *tmp;
+	wl_list_for_each_safe(node, tmp, cache, link) {
+		if(should_invalidate_cache(node->line)) {
+			wofi_remove_cache(mode, node->line);
+			free(node->line);
+			goto cache_cont;
+		}
+
+		struct desktop_entry* entry = malloc(sizeof(struct desktop_entry));
+		entry->full_path = node->line;
+		wl_list_insert(&desktop_entries, &entry->link);
+
+		cache_cont:
+		wl_list_remove(&node->link);
+		free(node);
+	}
+
+	free(cache);
+
+	char* data_home = get_data_home();
+	char* data_dirs = get_data_dirs();
 	char* dirs = utils_concat(3, data_home, ":", data_dirs);
 	free(data_home);
+	free(data_dirs);
 
 	char* save_ptr;
 	char* str = strtok_r(dirs, ":", &save_ptr);
 	do {
 		char* app_dir = utils_concat(2, str, "/applications");
-		insert_dir(app_dir, cached, entries);
+		insert_dir(app_dir);
 		free(app_dir);
 	} while((str = strtok_r(NULL, ":", &save_ptr)) != NULL);
 	free(dirs);
-	map_free(cached);
-	map_free(entries);
 }
 
 struct widget* wofi_drun_get_widget(void) {
-	struct node* node, *tmp;
-	wl_list_for_each_reverse_safe(node, tmp, &widgets, link) {
-		struct widget* widget = node->widget;
+	struct desktop_entry* node, *tmp;
+	wl_list_for_each_reverse_safe(node, tmp, &desktop_entries, link) {
+		struct widget* widget = create_widget(node->full_path);
 		wl_list_remove(&node->link);
 		free(node);
+		if(widget == NULL) {
+			continue;
+		}
 		return widget;
 	}
 	return NULL;
@@ -330,6 +388,13 @@ static void launch_done(GObject* obj, GAsyncResult* result, gpointer data) {
 	exit(1);
 }
 
+static void set_dri_prime(GDesktopAppInfo* info) {
+	bool dri_prime = g_desktop_app_info_get_boolean(info, "PrefersNonDefaultGPU");
+	if(dri_prime) {
+		setenv("DRI_PRIME", "1", true);
+	}
+}
+
 void wofi_drun_exec(const gchar* cmd) {
 	GDesktopAppInfo* info = g_desktop_app_info_new_from_filename(cmd);
 	if(G_IS_DESKTOP_APP_INFO(info)) {
@@ -338,6 +403,7 @@ void wofi_drun_exec(const gchar* cmd) {
 			printf("%s\n", g_app_info_get_commandline(G_APP_INFO(info)));
 			exit(0);
 		} else {
+			set_dri_prime(info);
 			g_app_info_launch_uris_async(G_APP_INFO(info), NULL, NULL, NULL, launch_done, (gchar*) cmd);
 		}
 	} else if(strrchr(cmd, ' ') != NULL) {
@@ -350,6 +416,7 @@ void wofi_drun_exec(const gchar* cmd) {
 			printf("%s\n", g_app_info_get_commandline(G_APP_INFO(info)));
 			fprintf(stderr, "Printing the command line for an action is not supported\n");
 		} else {
+			set_dri_prime(info);
 			g_desktop_app_info_launch_action(info, action, NULL);
 			utils_sleep_millis(500);
 		}

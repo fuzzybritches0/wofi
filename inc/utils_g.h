@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2019-2020 Scoopta
+ *  Copyright (C) 2020 Scoopta
  *  This file is part of Wofi
  *  Wofi is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -15,31 +15,15 @@
     along with Wofi.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef WAIFU_H
-#define WAIFU_H
+#ifndef UTILS_G_H
+#define UTILS_G_H
 
-#include <wofi_api.h>
+#include <stdint.h>
 
-#include <stdbool.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 
-#include <map.h>
+GdkPixbuf* utils_g_resize_pixbuf(GdkPixbuf* pixbuf, uint64_t image_size, GdkInterpType interp);
 
-#include <gtk/gtk.h>
+GdkPixbuf* utils_g_pixbuf_from_base64(char* base64);
 
-struct widget {
-	size_t action_count;
-	char* mode, **text, *search_text, **actions;
-	struct widget_builder* builder;
-};
-
-struct mode {
-	void (*mode_exec)(const gchar* cmd);
-	struct widget* (*mode_get_widget)(void);
-	char* name, *dso;
-	struct wl_list link;
-};
-
-void wofi_init(struct map* config);
-
-void wofi_load_css(bool nyan);
 #endif

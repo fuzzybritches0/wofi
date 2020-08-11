@@ -32,10 +32,10 @@ Specifies the mode to run in. A list of modes can be found in \fBwofi\fR(7).
 Identical to \fBshow\fR.
 .TP
 .B width=\fIWIDTH\fR
-Specifies the menu width in pixels, default is 1000.
+Specifies the menu width in pixels or percent of screen size, default is 50%. Pixels are used unless the number ends with a %.
 .TP
 .B height=\fIHEIGHT\fR
-Specifies the menu height in pixels, default is 400.
+Specifies the menu height in pixels or percent of screen size, default is 40%. Pixels are used unless the number ends with a %.
 .TP
 .B prompt=\fIPROMPT\fR
 Sets the prompt to be display in the search box, default is the name of the mode.
@@ -100,6 +100,15 @@ Specifies the number of columns to display, default is 1.
 .B sort_order=\fIORDER\fR
 Specifies the default sort order. There are currently two orders, default and alphabetical. See \fBwofi\fR(7) for details.
 .TP
+.B gtk_dark=\fIBOOL\fR
+If true, instructs wofi to use the dark variant of the current GTK theme (if available). Default is false.
+.TP
+.B search=\fISTRING\fR
+Specifies something to search for immediately on opening
+.TP
+.B monitor=\fISTRING\fR
+Sets the monitor to open on
+.TP
 .B orientation=\fIORIENTATION\fR
 Specifies the orientation, it can be either horizontal or vertical, default is vertical.
 .TP
@@ -142,6 +151,18 @@ Specifies the key to use in order to submit an action. Default is Return. See \f
 .B key_exit=\fIKEY\fR
 Specifies the key to use in order to exit wofi. Default is Escape. See \fBwofi\-keys\fR(7) for the key codes.
 .TP
+.B key_pgup=\fIKEY\fR
+Specifies the key to use in order to move one page up. Default is Page_Up. See \fBwofi\-keys\fR(7) for the key codes.
+.TP
+.B key_pgdn=\fIKEY\fR
+Specifies the key to use in order to move one page down. Default is Page_Down. See \fBwofi\-keys\fR(7) for the key codes.
+.TP
+.B key_expand=\fIKEY\fR
+Specifies the key to use in order to expand/contract multi-action entires. There is no default. See \fBwofi\-keys\fR(7) for the key codes.
+.TP
+.B key_hide_search=\fIKEY\fR
+Specifies the key to use in order to hide/show the search bar. There is no default. See \fBwofi\-keys\fR(7) for the key codes.
+.TP
 .B line_wrap=\fIMODE\fR
 Specifies the line wrap mode to use. The options are off, word, char, and word_char. Default is off.
 .TP
@@ -150,6 +171,12 @@ Specifies whether x and y offsets should be calculated using the global composit
 .TP
 .B hide_search=\fIBOOL\fR
 Specifies whether the search bar should be hidden. Default is false.
+.TP
+.B dynamic_lines=\fIBOOL\fR
+Specifies whether wofi should be dynamically shrunk to fit the number of visible lines or if it should always stay the same size. Default is false.
+.TP
+.B layer=\fILAYER\fR
+Specifies the layer to open on. The options are background, bottom, top, and overlay. Default is top
 
 .SH CSS SELECTORS
 Any GTK widget can be selected by using the name of its CSS node, these however might change with updates and are not guaranteed to stay constant. Wofi also provides certain widgets with names and classes which can be referenced from CSS to give access to the most important widgets easily. \fBwofi\fR(7) contains the current widget layout used by wofi so if you want to get into CSS directly using GTK widget names look there for info.

@@ -1,12 +1,12 @@
-project('wofi', 'c', version : 'v1.1.1', default_options : ['buildtype=release', 'warning_level=2'])
+project('wofi', 'c', version : 'v1.2.1', default_options : ['c_std=c99', 'buildtype=release', 'warning_level=2'])
 cc = meson.get_compiler('c')
 
 pkgcfg = import('pkgconfig')
 
 inc = include_directories('inc')
 gtk = dependency('gtk+-3.0')
-threads = dependency('threads')
 wayland = dependency('wayland-client')
+threads = dependency('threads')
 dl = cc.find_library('dl')
 
 hg = find_program('hg', native : true, required : false)
@@ -24,13 +24,15 @@ sources = ['src/config.c',
 			'src/main.c',
 			'src/map.c',
 			'src/property_box.c',
+			'src/utils_g.c',
 			'src/utils.c',
+			'src/widget_builder.c',
 			'src/wofi.c',
 			'proto/wlr-layer-shell-unstable-v1-protocol.c',
 			'proto/xdg-output-unstable-v1-protocol.c',
 			'proto/xdg-shell-protocol.c']
 			
-deps = [gtk, threads, wayland, dl]
+deps = [gtk, wayland, dl, threads]
 			
 if get_option('enable_run')
 	sources += 'modes/run.c'
@@ -59,7 +61,9 @@ subdir = 'wofi-1'
 
 install_headers('inc/config.h',
 				'inc/map.h',
+				'inc/utils_g.h',
 				'inc/utils.h',
+				'inc/widget_builder_api.h',
 				'inc/wofi_api.h',
 				subdir : subdir)
 

@@ -5,6 +5,8 @@ wofi \- Built in modes and other features
 .SH DESCRIPTION
 Wofi contains several built in modes as well as a lot of other features including combi which are documented here.
 
+The config options documented here are stripped of mode names. Mode specific config options are placed in the config file in the format \fBmode\-example_opt=val\fR. For example dmenu has an option called \fBparse_action\fR which would be placed in the config as \fBdmenu\-parse_action=true\fR.
+
 .SH MODES
 Currently wofi has 3 built in modes
 .IP 1. 4
@@ -30,6 +32,9 @@ The character used to separate dmenu entries, default is \\n.
 .B print_line_num=\fIBOOL\fR
 When an entry is selected the number of the line the entry was on is printed instead of the entry itself. This disables caching as it's fundamentally incompatible with it.
 
+.SH RUN
+In run mode holding ctrl while running an entry will cause arguments to be parsed even if always_parse_args=false. Holding shift will cause the entry to be run in a terminal.
+
 .SH RUN CONFIG OPTIONS
 .TP
 .B always_parse_args=\fIBOOL\fR
@@ -42,6 +47,9 @@ If true shows all the entries in path, this will show entries that have the same
 .TP
 .B print_command=\fIBOOL\fR
 If true the command used to launch the desktop file will be printed to stdout instead of invoking it, default is false.
+.TP
+.B display_generic=\fIBOOL\fR
+If true then generic names will be displayed in () next to the application name, default is false.
 
 .SH DRUN
 When images are enabled drun mode will pull icon themes however being a GTK app it's possible you'll need to run gtk\-update\-icon\-cache to get them to apply.
@@ -75,6 +83,22 @@ There are 2 order options currently, default and alphabetical. Default means the
 
 .SH CACHING
 Caching cannot be disabled however the cache file can be set to /dev/null to effectively disable it.
+
+.SH WINDOW SWITCHER
+Wofi does not have the ability to do window switching on its own as there is no way to do this with wayland/wlroots protocols however if you're using sway you can use swaymsg with dmenu mode to accomplish it.
+The following script can be used to do window switching:
+
+swaymsg \-t get_tree |
+.br
+  jq \-r '.nodes[].nodes[] | if .nodes then [recurse(.nodes[])] else [] end + .floating_nodes | .[] | select(.nodes==[]) | ((.id | tostring) + "\t" + .name)' |
+.br
+  wofi \-\-show dmenu | {
+.br
+    read \-r id name
+.br
+    swaymsg "[con_id=$id]" focus
+.br
+}
 
 .SH WIDGET LAYOUT
 This section is for advanced CSS which needs more control than the built in wofi CSS names/classes allow for. This widget layout is subject to change at any time and without warning so your CSS might very well break if you rely on this. Widgets have their corresponding names next to them if they have one.
