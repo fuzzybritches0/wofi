@@ -533,7 +533,7 @@ static gboolean _insert_widget(gpointer data) {
 		gtk_expander_set_label_widget(GTK_EXPANDER(parent), box);
 
 		GtkWidget* exp_box = gtk_list_box_new();
-		gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(exp_box), FALSE);
+		gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(exp_box), TRUE);
 		g_signal_connect(exp_box, "row-activated", G_CALLBACK(activate_item), NULL);
 		gtk_container_add(GTK_CONTAINER(parent), exp_box);
 		for(size_t count = 1; count < node->action_count; ++count) {
@@ -1780,7 +1780,7 @@ void wofi_init(struct map* _config) {
 	gtk_widget_set_valign(inner_box, valign);
 
 	gtk_widget_set_name(inner_box, "inner-box");
-	gtk_flow_box_set_activate_on_single_click(GTK_FLOW_BOX(inner_box), FALSE);
+	gtk_flow_box_set_activate_on_single_click(GTK_FLOW_BOX(inner_box), TRUE);
 
 	GtkWidget* wrapper_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_box_set_homogeneous(GTK_BOX(wrapper_box), TRUE);
